@@ -1020,6 +1020,13 @@
                   placeholder="Kurzbeschreibung des Vorhabens"
                 ></textarea>
               </label>
+              <div class="project-export-field project-export-wide project-export-field--toggle">
+                <span data-export-label="legend">Legende im PDF</span>
+                <label class="project-export-checkbox" for="project-exp-legend">
+                  <input id="project-exp-legend" type="checkbox" />
+                  <span>Legende nach der Projektbeschreibung anzeigen</span>
+                </label>
+              </div>
             </div>
             <div class="project-export-actions project-export-actions-form">
               <button id="project-export-run" class="download-option project-export-primary" type="button">
@@ -2158,21 +2165,7 @@
           if (!style) return;
           map.setStyle(style);
           map?.once?.("style.load", () => {
-            const restoreProjectLayers = () => {
-              try {
-                updateMeasureSource();
-                updateProjectAreaSource();
-                if (projectExportFrameActive) {
-                  ensureProjectExportFrameLayers();
-                  updateProjectExportFramePreview({ syncToMapCenter: false });
-                }
-                bringProjectOverlayLayersToFront();
-              } catch (err) {
-                console.warn("Projekt-Layer nach Basemap-Wechsel konnten nicht vollständig restauriert werden:", err);
-              }
-            };
-            map?.once?.("idle", restoreProjectLayers);
-            setTimeout(restoreProjectLayers, 320);
+            scheduleProjectOverlayRestoreAfterStyleChange();
           });
           currentBasemap = next;
           updateAttribution(next);
@@ -3421,6 +3414,7 @@
           ? projectExpScale.querySelector('option[value="custom"]')
           : null;
         const projectExpDesc = document.getElementById("project-exp-desc");
+        const projectExpLegend = document.getElementById("project-exp-legend");
         const projectExportFormFieldRefs = {
           projectName: {
             control: projectExpName,
@@ -3525,6 +3519,8 @@
         const projectBufferFillLayerId = "project-buffer-fill";
         const projectBufferLineLayerId = "project-buffer-line";
         const projectObjectPointLayerId = "project-object-point";
+        const projectObjectPointLabelLayerId = "project-object-label-point";
+        const projectObjectAreaLabelLayerId = "project-object-label-area";
         const projectClusterLassoSourceId = "project-cluster-lasso-source";
         const projectClusterLassoFillLayerId = "project-cluster-lasso-fill";
         const projectClusterLassoLineLayerId = "project-cluster-lasso-line";
@@ -3635,27 +3631,56 @@
           return `#${toHex(red)}${toHex(green)}${toHex(blue)}`;
         }
 
-        function getProjectPointClusterAutoColor(clusterId) {
+        function hashProjectColorScopeKey(value) {
+          const text = String(value || "").trim().toLowerCase();
+          if (!text) return 0;
+          let hash = 0;
+          for (let index = 0; index < text.length; index += 1) {
+            hash = (hash * 31 + text.charCodeAt(index)) >>> 0;
+          }
+          return hash;
+        }
+
+        function getProjectPointColorScope(itemOrScope = null) {
+          if (typeof itemOrScope === "string") {
+            const directScope = String(itemOrScope || "").trim();
+            return directScope || "manual";
+          }
+          const uploadGroupId = String(itemOrScope?.uploadGroupId || "").trim();
+          return uploadGroupId ? `upload:${uploadGroupId}` : "manual";
+        }
+
+        function getProjectPointClusterColorKey(clusterId, itemOrScope = null) {
           const normalizedId = normalizeProjectPointClusterId(clusterId);
-          const hue = (normalizedId * 137.508) % 360;
+          const scopeKey = getProjectPointColorScope(itemOrScope);
+          return `${scopeKey}:cluster:${normalizedId}`;
+        }
+
+        function isProjectPointClusterColorMatch(item, clusterId, itemOrScope = null) {
+          if (!isProjectPointObject(item)) return false;
+          return (
+            getProjectPointClusterColorKey(getProjectPointClusterId(item), item) ===
+            getProjectPointClusterColorKey(clusterId, itemOrScope)
+          );
+        }
+
+        function getProjectPointClusterAutoColor(clusterId, itemOrScope = null) {
+          const colorKey = getProjectPointClusterColorKey(clusterId, itemOrScope);
+          const hue = (hashProjectColorScopeKey(colorKey) * 137.508) % 360;
           return projectHslToHex(hue, 62, 52);
         }
 
-        function getProjectPointClusterColor(clusterId, items = projectObjects) {
-          const normalizedId = normalizeProjectPointClusterId(clusterId);
-          const overrideColor = getProjectStoredObjectColor(
-            projectPointClusterColorOverrides.get(normalizedId)
-          );
+        function getProjectPointClusterColor(clusterId, itemOrScope = null, items = projectObjects) {
+          const colorKey = getProjectPointClusterColorKey(clusterId, itemOrScope);
+          const overrideColor = getProjectStoredObjectColor(projectPointClusterColorOverrides.get(colorKey));
           if (overrideColor) return overrideColor;
           const clusterItems = (items || []).filter(
-            item =>
-              isProjectPointObject(item) &&
-              normalizeProjectPointClusterId(item?.pointClusterId) === normalizedId
+            item => isProjectPointClusterColorMatch(item, clusterId, itemOrScope)
           );
           const storedItemColor = clusterItems
             .map(item => getProjectStoredObjectColor(item?.displayColor))
             .find(Boolean);
-          return storedItemColor || getProjectPointClusterAutoColor(normalizedId);
+          return storedItemColor || getProjectPointClusterAutoColor(clusterId, itemOrScope);
         }
 
         function setProjectObjectDisplayColorValue(item, colorValue) {
@@ -3667,24 +3692,29 @@
           return true;
         }
 
-        function getProjectColorActionPointClusterId(items = []) {
+        function getProjectColorActionPointClusterInfo(items = []) {
           const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
           if (!targets.length || !targets.every(isProjectPointObject)) return null;
-          const clusterIds = Array.from(new Set(targets.map(item => getProjectPointClusterId(item))));
-          return clusterIds.length === 1 ? clusterIds[0] : null;
+          const colorKeys = Array.from(
+            new Set(targets.map(item => getProjectPointClusterColorKey(getProjectPointClusterId(item), item)))
+          );
+          if (colorKeys.length !== 1) return null;
+          return {
+            clusterId: getProjectPointClusterId(targets[0]),
+            scopeKey: getProjectPointColorScope(targets[0])
+          };
         }
 
-        function applyProjectPointClusterColor(clusterId, colorValue, items = projectObjects) {
-          const normalizedId = normalizeProjectPointClusterId(clusterId);
+        function applyProjectPointClusterColor(clusterId, colorValue, itemOrScope = null, items = projectObjects) {
+          const colorKey = getProjectPointClusterColorKey(clusterId, itemOrScope);
           const nextColor = normalizeProjectObjectColor(
             colorValue,
-            getProjectPointClusterAutoColor(normalizedId)
+            getProjectPointClusterAutoColor(clusterId, itemOrScope)
           );
-          projectPointClusterColorOverrides.set(normalizedId, nextColor);
+          projectPointClusterColorOverrides.set(colorKey, nextColor);
           let changed = false;
           (items || []).forEach(item => {
-            if (!isProjectPointObject(item)) return;
-            if (getProjectPointClusterId(item) !== normalizedId) return;
+            if (!isProjectPointClusterColorMatch(item, clusterId, itemOrScope)) return;
             if (setProjectObjectDisplayColorValue(item, nextColor)) changed = true;
           });
           return changed;
@@ -3694,7 +3724,7 @@
           const activeClusterIds = new Set(
             (items || [])
               .filter(isProjectPointObject)
-              .map(item => normalizeProjectPointClusterId(item?.pointClusterId))
+              .map(item => getProjectPointClusterColorKey(getProjectPointClusterId(item), item))
           );
           Array.from(projectPointClusterColorOverrides.keys()).forEach(clusterId => {
             if (!activeClusterIds.has(clusterId)) {
@@ -3717,7 +3747,7 @@
           const storedColor = getProjectStoredObjectColor(item?.displayColor);
           if (storedColor) return storedColor;
           if (isProjectPointObject(item)) {
-            return getProjectPointClusterColor(item?.pointClusterId);
+            return getProjectPointClusterColor(item?.pointClusterId, item);
           }
           return normalizeProjectObjectColor(item?.displayColor);
         }
@@ -3725,10 +3755,14 @@
         function setProjectObjectsDisplayColor(items, colorValue) {
           const nextColor = normalizeProjectObjectColor(colorValue);
           const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
-          const pointClusterId = getProjectColorActionPointClusterId(targets);
+          const pointClusterInfo = getProjectColorActionPointClusterInfo(targets);
           let changed = false;
-          if (pointClusterId) {
-            changed = applyProjectPointClusterColor(pointClusterId, nextColor);
+          if (pointClusterInfo) {
+            changed = applyProjectPointClusterColor(
+              pointClusterInfo.clusterId,
+              nextColor,
+              pointClusterInfo.scopeKey
+            );
           } else {
             targets.forEach(item => {
               if (setProjectObjectDisplayColorValue(item, nextColor)) changed = true;
@@ -3808,6 +3842,237 @@
           });
 
           return colorBtn;
+        }
+
+        function getProjectObjectAttributeProperties(item) {
+          const properties = item?.importProperties;
+          return properties && typeof properties === "object" && !Array.isArray(properties)
+            ? properties
+            : null;
+        }
+
+        function getProjectObjectLabelField(item) {
+          return String(item?.labelField || "").trim();
+        }
+
+        function getProjectObjectLegendAlias(item) {
+          return String(item?.legendAlias || "").trim();
+        }
+
+        function getProjectObjectLabelText(item) {
+          const field = getProjectObjectLabelField(item);
+          const properties = getProjectObjectAttributeProperties(item);
+          if (!field || !properties || !Object.prototype.hasOwnProperty.call(properties, field)) {
+            return "";
+          }
+          const value = properties[field];
+          if (value == null) return "";
+          return String(value).trim();
+        }
+
+        function getProjectAvailableLabelColumns(items) {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          const columns = new Set();
+          targets.forEach(item => {
+            const properties = getProjectObjectAttributeProperties(item);
+            if (!properties) return;
+            Object.keys(properties).forEach(key => {
+              const name = String(key || "").trim();
+              if (!name || name.startsWith("__")) return;
+              columns.add(name);
+            });
+          });
+          return Array.from(columns).sort((left, right) => left.localeCompare(right));
+        }
+
+        function getProjectCommonLabelField(items) {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!targets.length) return "";
+          const firstField = getProjectObjectLabelField(targets[0]);
+          if (targets.every(item => getProjectObjectLabelField(item) === firstField)) {
+            return firstField;
+          }
+          return "";
+        }
+
+        function getProjectCommonLegendAlias(items) {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!targets.length) return "";
+          const firstAlias = getProjectObjectLegendAlias(targets[0]);
+          if (targets.every(item => getProjectObjectLegendAlias(item) === firstAlias)) {
+            return firstAlias;
+          }
+          return "";
+        }
+
+        function getProjectLegendDisplayLabel(items, fallbackLabel = "Objekt") {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!targets.length) return String(fallbackLabel || "").trim() || "Objekt";
+          const alias = getProjectCommonLegendAlias(targets);
+          if (alias) return alias;
+          if (targets.length === 1) {
+            const item = targets[0];
+            const directName = String(item?.name || "").trim();
+            if (directName) return directName;
+            const modeLabel = getProjectObjectTypeLabel(
+              item?.mode || getProjectModeFromGeometryType(item?.geometry?.type)
+            );
+            if (modeLabel) return modeLabel;
+          }
+          return String(fallbackLabel || "").trim() || "Objekt";
+        }
+
+        function canProjectObjectsUseLabels(items) {
+          return getProjectAvailableLabelColumns(items).length > 0;
+        }
+
+        function applyProjectObjectLabelField(items, labelField = "", label = "Objekt") {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!targets.length) return false;
+          const nextField = String(labelField || "").trim();
+          targets.forEach(item => {
+            if (!nextField) {
+              delete item.labelField;
+              return;
+            }
+            item.labelField = nextField;
+          });
+          updateProjectAreaSource();
+          setProjectExportStatus(
+            nextField
+              ? `Beschriftung "${nextField}" für "${label}" aktiviert.`
+              : `Beschriftung für "${label}" deaktiviert.`
+          );
+          return true;
+        }
+
+        function applyProjectObjectLegendAlias(items, legendAlias = "", label = "Objekt") {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!targets.length) return false;
+          const nextAlias = String(legendAlias || "").trim();
+          targets.forEach(item => {
+            if (!nextAlias) {
+              delete item.legendAlias;
+              return;
+            }
+            item.legendAlias = nextAlias;
+          });
+          updateProjectAreaSource();
+          setProjectExportStatus(
+            nextAlias
+              ? `Legendenname "${nextAlias}" für "${label}" gesetzt.`
+              : `Legendenname für "${label}" zurückgesetzt.`
+          );
+          return true;
+        }
+
+        function promptProjectObjectLabelField(items, label = "Objekt") {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          const columns = getProjectAvailableLabelColumns(targets);
+          if (!columns.length) {
+            setProjectExportStatus(`Für "${label}" sind keine importierten Attribute verfügbar.`, true);
+            return false;
+          }
+          const currentField = getProjectCommonLabelField(targets);
+          const lines = [
+            `Beschriftung für "${label}" wählen:`,
+            "0 = Ohne Beschriftung"
+          ];
+          columns.forEach((column, index) => {
+            lines.push(`${index + 1} = ${column}`);
+          });
+          const raw = window.prompt(
+            lines.join("\n"),
+            currentField && columns.includes(currentField)
+              ? String(columns.indexOf(currentField) + 1)
+              : "0"
+          );
+          if (raw == null) return false;
+          const value = String(raw).trim();
+          if (!value || value === "0" || /^aus$/i.test(value) || /^ohne$/i.test(value)) {
+            return applyProjectObjectLabelField(targets, "", label);
+          }
+          const selectedIndex = Number.parseInt(value, 10);
+          let nextField = "";
+          if (
+            Number.isFinite(selectedIndex) &&
+            selectedIndex >= 1 &&
+            selectedIndex <= columns.length
+          ) {
+            nextField = columns[selectedIndex - 1];
+          } else {
+            nextField =
+              columns.find(column => column.toLowerCase() === value.toLowerCase()) || "";
+          }
+          if (!nextField) {
+            setProjectExportStatus("Ungültige Attributspalte für die Beschriftung.", true);
+            return false;
+          }
+          return applyProjectObjectLabelField(targets, nextField, label);
+        }
+
+        function promptProjectObjectLegendAlias(items, label = "Objekt") {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!targets.length) return false;
+          const currentAlias = getProjectCommonLegendAlias(targets);
+          const raw = window.prompt(
+            `Legendenname für "${label}" eingeben:\nLeer lassen = Standardname aus der Objektliste`,
+            currentAlias
+          );
+          if (raw == null) return false;
+          return applyProjectObjectLegendAlias(targets, raw, label);
+        }
+
+        function buildProjectLabelAction(items, label = "Objekt") {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!targets.length || !canProjectObjectsUseLabels(targets)) return null;
+          const currentField = getProjectCommonLabelField(targets);
+          const labelBtn = document.createElement("button");
+          labelBtn.type = "button";
+          labelBtn.className = "project-layer-action project-layer-action--text";
+          if (currentField) {
+            labelBtn.classList.add("is-active");
+          }
+          labelBtn.dataset.action = "label";
+          labelBtn.title = currentField
+            ? `Beschriftung: ${currentField}`
+            : "Beschriftung aus Attributen wählen";
+          labelBtn.setAttribute(
+            "aria-label",
+            currentField
+              ? `Beschriftung ${currentField} für ${label} ändern`
+              : `Beschriftung für ${label} aktivieren`
+          );
+          labelBtn.textContent = "T";
+          labelBtn.addEventListener("click", () => {
+            promptProjectObjectLabelField(targets, label);
+          });
+          return labelBtn;
+        }
+
+        function buildProjectLegendAliasAction(items, label = "Objekt") {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!targets.length) return null;
+          const currentAlias = getProjectCommonLegendAlias(targets);
+          const legendBtn = document.createElement("button");
+          legendBtn.type = "button";
+          legendBtn.className = "project-layer-action project-layer-action--legend";
+          if (currentAlias) {
+            legendBtn.classList.add("is-active");
+          }
+          legendBtn.dataset.action = "legend";
+          legendBtn.title = currentAlias ? `Legendenname: ${currentAlias}` : "Legendenname für PDF setzen";
+          legendBtn.setAttribute(
+            "aria-label",
+            currentAlias
+              ? `Legendenname ${currentAlias} für ${label} ändern`
+              : `Legendenname für ${label} setzen`
+          );
+          legendBtn.textContent = "L";
+          legendBtn.addEventListener("click", () => {
+            promptProjectObjectLegendAlias(targets, label);
+          });
+          return legendBtn;
         }
         const exportScaleOptions = new Set([250, 500, 1000, 1500, 2000]);
         const exportScaleCustomValue = "custom";
@@ -3969,6 +4234,9 @@
         let projectSpreadsheetImportPending = null;
         let projectSelectedObjectId = "";
         let projectObjectSeq = 1;
+        let projectLayerDragRowKey = "";
+        let projectLayerDropRowKey = "";
+        let projectLayerDropPlacement = "";
         let projectClusterLassoActive = false;
         let projectClusterLassoDragging = false;
         let projectClusterLassoPanning = false;
@@ -3996,6 +4264,7 @@
         let projectExportRasterSnapApplying = false;
         let projectExportRasterSnapPendingCenter = null;
         let projectExportRasterSnapRaf = 0;
+        let projectOverlayStyleRestoreNonce = 0;
         let projectExportFrameActive = false;
         let projectExportFrameBounds = null;
         let projectExportFrameCenter = null;
@@ -5072,6 +5341,8 @@
           const day = String(now.getDate()).padStart(2, "0");
           const month = String(now.getMonth() + 1).padStart(2, "0");
           const year = now.getFullYear();
+          const legendEntries = collectProjectExportLegendEntries();
+          const legendEnabled = !!projectExpLegend?.checked && legendEntries.length > 0;
           return {
             projektname: readTextValue(projectExpName),
             kunde: readTextValue(projectExpCustomer),
@@ -5089,6 +5360,8 @@
             baubeginn: formatDateGerman(readTextValue(projectExpStart)),
             bauende: formatDateGerman(readTextValue(projectExpEnd)),
             beschreibung: readTextValue(projectExpDesc),
+            legendEnabled,
+            legendEntries: legendEnabled ? legendEntries : [],
             datum: `${day}.${month}.${year}`
           };
         }
@@ -5589,7 +5862,8 @@
           projectExportRasterFrames.push({
             id: `raster-${projectExportRasterFrameSeq}`,
             bounds: cloneJson(currentBounds),
-            scale: frameScale
+            scale: frameScale,
+            renderState: captureProjectExportRenderState()
           });
           updateProjectExportFrameSource();
           syncProjectExportPreviewToolbar();
@@ -5961,6 +6235,8 @@
             projectClusterLassoLineLayerId,
             projectClusterLassoPointLayerId,
             projectObjectPointLayerId,
+            projectObjectAreaLabelLayerId,
+            projectObjectPointLabelLayerId,
             projectDraftPreviewLayerId,
             projectDraftVertexLayerId,
             projectExportRasterFrameFillLayerId,
@@ -5980,6 +6256,40 @@
               // Ignore transient move errors while style is still settling.
             }
           });
+        }
+
+        function restoreProjectOverlayLayersAfterStyleChange() {
+          try {
+            ensureMeasureLayers();
+            updateMeasureSource();
+            updateMeasureLabel();
+            ensureProjectAreaLayers();
+            updateProjectAreaSource();
+            if (projectExportFrameActive) {
+              ensureProjectExportFrameLayers();
+              updateProjectExportFramePreview({ syncToMapCenter: false });
+            }
+            bringProjectOverlayLayersToFront();
+          } catch (err) {
+            console.warn(
+              "Projekt-Layer nach Style-Wechsel konnten nicht vollständig restauriert werden:",
+              err
+            );
+          }
+        }
+
+        function scheduleProjectOverlayRestoreAfterStyleChange() {
+          projectOverlayStyleRestoreNonce += 1;
+          const nonce = projectOverlayStyleRestoreNonce;
+          const restoreIfCurrent = () => {
+            if (nonce !== projectOverlayStyleRestoreNonce) return;
+            restoreProjectOverlayLayersAfterStyleChange();
+          };
+          restoreIfCurrent();
+          map?.once?.("idle", restoreIfCurrent);
+          window.requestAnimationFrame(restoreIfCurrent);
+          setTimeout(restoreIfCurrent, 220);
+          setTimeout(restoreIfCurrent, 520);
         }
 
         function updateProjectExportFrameSource() {
@@ -6143,6 +6453,73 @@
           return JSON.parse(JSON.stringify(data));
         }
 
+        function cloneProjectImportProperties(properties) {
+          if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+            return null;
+          }
+          const next = cloneJson(properties);
+          return next && typeof next === "object" && !Array.isArray(next) ? next : null;
+        }
+
+        function resolveProjectExportRenderBasemapId(renderState = null) {
+          const stateBasemapId = String(renderState?.basemapId || "").trim();
+          if (stateBasemapId && basemapById.has(stateBasemapId)) {
+            return stateBasemapId;
+          }
+          const activeId = String(activeBasemapId || currentBasemap?.id || "").trim();
+          if (activeId && basemapById.has(activeId)) {
+            return activeId;
+          }
+          const fallbackId = String(basemap?.id || basemapList[0]?.id || "").trim();
+          return fallbackId && basemapById.has(fallbackId) ? fallbackId : "";
+        }
+
+        function captureProjectExportRenderState(items = projectObjects) {
+          const objectStates = {};
+          (items || []).forEach(item => {
+            const objectId = String(item?.id || "").trim();
+            if (!objectId) return;
+            objectStates[objectId] = {
+              visible: item.visible !== false,
+              labelField: getProjectObjectLabelField(item)
+            };
+          });
+          return {
+            basemapId: resolveProjectExportRenderBasemapId(),
+            alkisEnabled: !!alkisEnabled,
+            objectStates
+          };
+        }
+
+        function getProjectObjectsForRenderState(renderState = null, items = projectObjects) {
+          const stateMap =
+            renderState?.objectStates &&
+            typeof renderState.objectStates === "object" &&
+            !Array.isArray(renderState.objectStates)
+              ? renderState.objectStates
+              : null;
+          return (items || [])
+            .map(item => {
+              if (!item || typeof item !== "object") return null;
+              const nextItem = cloneJson(item);
+              if (!nextItem || typeof nextItem !== "object") return null;
+              const stateEntry = stateMap ? stateMap[String(item.id || "").trim()] : null;
+              if (stateEntry && typeof stateEntry === "object") {
+                if (typeof stateEntry.visible === "boolean") {
+                  nextItem.visible = stateEntry.visible;
+                }
+                const nextLabelField = String(stateEntry.labelField || "").trim();
+                if (nextLabelField) {
+                  nextItem.labelField = nextLabelField;
+                } else {
+                  delete nextItem.labelField;
+                }
+              }
+              return nextItem;
+            })
+            .filter(Boolean);
+        }
+
         function normalizeCoord(coord) {
           if (!Array.isArray(coord) || coord.length < 2) return null;
           const lng = Number(coord[0]);
@@ -6237,6 +6614,33 @@
             [minLng, minLat],
             [maxLng, maxLat]
           ];
+        }
+
+        function getProjectGeometryLabelAnchorCoord(geometry) {
+          if (!geometry) return null;
+          if (window.turf && typeof window.turf.pointOnFeature === "function") {
+            try {
+              const feature = {
+                type: "Feature",
+                properties: {},
+                geometry: cloneJson(geometry)
+              };
+              const anchor = normalizeCoord(window.turf.pointOnFeature(feature)?.geometry?.coordinates);
+              if (anchor) return anchor;
+            } catch (_err) {
+              // Fall back to bounds center below.
+            }
+          }
+          const bounds = getGeometryBounds(geometry);
+          if (bounds) {
+            return [
+              Number((bounds[0][0] + bounds[1][0]) / 2),
+              Number((bounds[0][1] + bounds[1][1]) / 2)
+            ];
+          }
+          const coords = [];
+          collectCoordsFromGeometry(geometry, coords);
+          return normalizeCoord(coords[0]) || null;
         }
 
         function getProjectModeFromGeometryType(type) {
@@ -6350,7 +6754,15 @@
         }
 
         function syncProjectAreaFeatureFromObjects(preferredId = projectSelectedObjectId) {
-          const polygonObjects = projectObjects.filter(
+          projectAreaFeature = getProjectAreaFeatureFromObjects(projectObjects, preferredId);
+        }
+
+        function getProjectAreaFeatureFromObjects(
+          items = projectObjects,
+          preferredId = projectSelectedObjectId
+        ) {
+          const objectList = Array.isArray(items) ? items : [];
+          const polygonObjects = objectList.filter(
             item => item?.geometry && isPolygonGeometryType(item.geometry.type)
           );
           const visiblePolygonObjects = polygonObjects.filter(item => item.visible !== false);
@@ -6368,10 +6780,9 @@
             chosen = polygonObjects[polygonObjects.length - 1] || null;
           }
           if (!chosen) {
-            projectAreaFeature = getVisibleProjectMergedBufferFeature();
-            return;
+            return getVisibleProjectMergedBufferFeature(objectList);
           }
-          projectAreaFeature = {
+          return {
             type: "Feature",
             properties: { name: chosen.name || "Projektgebiet", objectId: chosen.id },
             geometry: cloneJson(chosen.geometry)
@@ -6927,7 +7338,7 @@
               group = {
                 key,
                 displayColor: pointClusterId
-                  ? getProjectPointClusterColor(pointClusterId)
+                  ? getProjectPointClusterColor(pointClusterId, item, items)
                   : getProjectObjectDisplayColor(item),
                 uploadGroupId: String(item?.uploadGroupId || "").trim(),
                 uploadGroupName: String(item?.uploadGroupName || "").trim(),
@@ -7001,8 +7412,8 @@
             .filter(Boolean);
         }
 
-        function getVisibleProjectMergedBufferFeature() {
-          const mergedEntries = getProjectMergedBufferEntries(projectObjects, { visibleOnly: true });
+        function getVisibleProjectMergedBufferFeature(items = projectObjects) {
+          const mergedEntries = getProjectMergedBufferEntries(items, { visibleOnly: true });
           if (!mergedEntries.length) return null;
           const overallGeometry = mergeProjectPolygonGeometries(
             mergedEntries.map(entry => entry.geometry)
@@ -7098,6 +7509,7 @@
         }
 
         function buildProjectLayerGroupRow({
+          rowKey = "",
           label = "Gruppe",
           typeLabel = "UPL",
           items = [],
@@ -7105,119 +7517,326 @@
           deleteTitle = "Gruppe löschen",
           deleteStatus = ""
         } = {}) {
-          const parts = [];
-          if (uploadGroupFormat) parts.push(uploadGroupFormat);
-          parts.push(getProjectLayerGroupedItemLabel(items));
-          const commonBuffer = getProjectLayerCommonBufferMeters(items);
-          if (commonBuffer > 0) parts.push(`Puffer ${commonBuffer} m`);
-          return {
+          const row = {
             kind: "group",
+            rowKey,
             label,
             typeLabel,
             items,
-            summaryText: parts.join(" · "),
+            uploadGroupFormat,
+            summaryText: "",
             deleteTitle,
             deleteStatus
           };
+          updateProjectLayerGroupRowSummary(row);
+          return row;
+        }
+
+        function getProjectLayerRowItems(rowEntry) {
+          if (rowEntry?.kind === "group") {
+            return Array.isArray(rowEntry.items) ? rowEntry.items.filter(Boolean) : [];
+          }
+          if (rowEntry?.kind === "single" && rowEntry.item) {
+            return [rowEntry.item];
+          }
+          return [];
+        }
+
+        function getProjectLayerRowKeyForItem(item) {
+          if (!item) return "";
+          const uploadGroupId = String(item?.uploadGroupId || "").trim();
+          if (isProjectPointObject(item)) {
+            const clusterId = getProjectPointClusterId(item);
+            return uploadGroupId
+              ? `upload-cluster:${uploadGroupId}:${clusterId}`
+              : `manual-cluster:${clusterId}`;
+          }
+          if (uploadGroupId) return `upload-group:${uploadGroupId}:other`;
+          const objectId = String(item?.id || "").trim();
+          return objectId ? `single:${objectId}` : "";
+        }
+
+        function getProjectLayerRowKey(rowEntry) {
+          const explicitRowKey = String(rowEntry?.rowKey || "").trim();
+          if (explicitRowKey) return explicitRowKey;
+          const items = getProjectLayerRowItems(rowEntry);
+          return getProjectLayerRowKeyForItem(items[0] || rowEntry?.item || null);
+        }
+
+        function updateProjectLayerGroupRowSummary(rowEntry) {
+          if (!rowEntry || rowEntry.kind !== "group") return;
+          const parts = [];
+          const uploadGroupFormat = String(rowEntry.uploadGroupFormat || "").trim();
+          if (uploadGroupFormat) parts.push(uploadGroupFormat);
+          parts.push(getProjectLayerGroupedItemLabel(rowEntry.items));
+          const commonBuffer = getProjectLayerCommonBufferMeters(rowEntry.items);
+          if (commonBuffer > 0) parts.push(`Puffer ${commonBuffer} m`);
+          rowEntry.summaryText = parts.join(" · ");
+        }
+
+        function buildProjectLayerDisplayRowForItem(item) {
+          if (!item) return null;
+          const rowKey = getProjectLayerRowKeyForItem(item);
+          if (!rowKey) return null;
+          const uploadGroupId = String(item?.uploadGroupId || "").trim();
+          const uploadGroupName = String(item?.uploadGroupName || "").trim() || "Upload";
+          const uploadGroupFormat = String(item?.uploadGroupFormat || "").trim();
+          if (isProjectPointObject(item)) {
+            const clusterId = getProjectPointClusterId(item);
+            if (uploadGroupId) {
+              return buildProjectLayerGroupRow({
+                rowKey,
+                label: `${uploadGroupName} · ${getProjectPointClusterName(clusterId)}`,
+                typeLabel: "UPL",
+                items: [],
+                uploadGroupFormat,
+                deleteTitle: "Cluster löschen",
+                deleteStatus: `${getProjectPointClusterName(clusterId)} aus "${uploadGroupName}" gelöscht.`
+              });
+            }
+            return buildProjectLayerGroupRow({
+              rowKey,
+              label: getProjectPointClusterName(clusterId),
+              typeLabel: "PCL",
+              items: [],
+              deleteTitle: "Cluster löschen",
+              deleteStatus: `${getProjectPointClusterName(clusterId)} gelöscht.`
+            });
+          }
+          if (uploadGroupId) {
+            return buildProjectLayerGroupRow({
+              rowKey,
+              label: uploadGroupName,
+              typeLabel: "UPL",
+              items: [],
+              uploadGroupFormat,
+              deleteTitle: "Upload löschen",
+              deleteStatus: `Upload "${uploadGroupName}" gelöscht.`
+            });
+          }
+          return {
+            kind: "single",
+            rowKey,
+            item
+          };
+        }
+
+        function buildProjectObjectsFromLayerRows(rows) {
+          const sourceItemsById = new Map(
+            projectObjects
+              .map(item => [String(item?.id || "").trim(), item])
+              .filter(entry => !!entry[0] && !!entry[1])
+          );
+          const nextObjects = [];
+          const seenIds = new Set();
+          (rows || [])
+            .slice()
+            .reverse()
+            .forEach(rowEntry => {
+              getProjectLayerRowItems(rowEntry)
+                .slice()
+                .reverse()
+                .forEach(item => {
+                  const objectId = String(item?.id || "").trim();
+                  if (!objectId || seenIds.has(objectId)) return;
+                  const sourceItem = sourceItemsById.get(objectId);
+                  if (!sourceItem) return;
+                  seenIds.add(objectId);
+                  nextObjects.push(sourceItem);
+                });
+            });
+          sourceItemsById.forEach((item, objectId) => {
+            if (seenIds.has(objectId)) return;
+            nextObjects.push(item);
+          });
+          return nextObjects;
+        }
+
+        function moveProjectLayerDisplayRow(dragRowKey, targetRowKey, placement = "before") {
+          const sourceRows = getProjectLayerDisplayRows();
+          const currentDragKey = String(dragRowKey || "").trim();
+          const currentTargetKey = String(targetRowKey || "").trim();
+          if (!currentDragKey || !currentTargetKey || currentDragKey === currentTargetKey) {
+            return false;
+          }
+          const dragIndex = sourceRows.findIndex(rowEntry => getProjectLayerRowKey(rowEntry) === currentDragKey);
+          const targetIndex = sourceRows.findIndex(
+            rowEntry => getProjectLayerRowKey(rowEntry) === currentTargetKey
+          );
+          if (dragIndex < 0 || targetIndex < 0) return false;
+          const nextRows = sourceRows.slice();
+          const [dragRow] = nextRows.splice(dragIndex, 1);
+          let insertIndex = nextRows.findIndex(
+            rowEntry => getProjectLayerRowKey(rowEntry) === currentTargetKey
+          );
+          if (insertIndex < 0) return false;
+          if (placement === "after") insertIndex += 1;
+          nextRows.splice(insertIndex, 0, dragRow);
+          const nextObjects = buildProjectObjectsFromLayerRows(nextRows);
+          if (!nextObjects.length) return false;
+          projectObjects = nextObjects;
+          updateProjectAreaSource();
+          setProjectExportStatus("Objektreihenfolge aktualisiert.");
+          return true;
+        }
+
+        function clearProjectLayerDropIndicators() {
+          if (!projectLayerList) return;
+          projectLayerList
+            .querySelectorAll(".project-layer-item.is-drop-before, .project-layer-item.is-drop-after")
+            .forEach(row => {
+              row.classList.remove("is-drop-before", "is-drop-after");
+            });
+        }
+
+        function resetProjectLayerDragState() {
+          projectLayerDragRowKey = "";
+          projectLayerDropRowKey = "";
+          projectLayerDropPlacement = "";
+          if (!projectLayerList) return;
+          clearProjectLayerDropIndicators();
+          projectLayerList.querySelectorAll(".project-layer-item.is-dragging").forEach(row => {
+            row.classList.remove("is-dragging");
+          });
+        }
+
+        function createProjectLayerDragHandle(row, rowKey, label = "Objekt") {
+          const handle = document.createElement("span");
+          handle.className = "project-layer-drag-handle";
+          handle.draggable = true;
+          handle.title = "Reihenfolge ändern";
+          handle.setAttribute("aria-label", `Reihenfolge von ${label} ändern`);
+          handle.textContent = ":::";
+          handle.addEventListener("dragstart", event => {
+            projectLayerDragRowKey = rowKey;
+            projectLayerDropRowKey = "";
+            projectLayerDropPlacement = "";
+            row.classList.add("is-dragging");
+            clearProjectLayerDropIndicators();
+            if (event.dataTransfer) {
+              event.dataTransfer.effectAllowed = "move";
+              event.dataTransfer.setData("text/plain", rowKey);
+            }
+          });
+          handle.addEventListener("dragend", () => {
+            resetProjectLayerDragState();
+          });
+          return handle;
+        }
+
+        function attachProjectLayerRowDropEvents(row, rowKey) {
+          row.dataset.rowKey = rowKey;
+          row.addEventListener("dragover", event => {
+            if (!projectLayerDragRowKey || projectLayerDragRowKey === rowKey) return;
+            event.preventDefault();
+            const bounds = row.getBoundingClientRect();
+            const placement =
+              event.clientY >= bounds.top + bounds.height / 2 ? "after" : "before";
+            if (
+              projectLayerDropRowKey === rowKey &&
+              projectLayerDropPlacement === placement
+            ) {
+              return;
+            }
+            projectLayerDropRowKey = rowKey;
+            projectLayerDropPlacement = placement;
+            clearProjectLayerDropIndicators();
+            row.classList.add(placement === "after" ? "is-drop-after" : "is-drop-before");
+          });
+          row.addEventListener("drop", event => {
+            if (!projectLayerDragRowKey || projectLayerDragRowKey === rowKey) return;
+            event.preventDefault();
+            const placement = projectLayerDropPlacement === "after" ? "after" : "before";
+            moveProjectLayerDisplayRow(projectLayerDragRowKey, rowKey, placement);
+            resetProjectLayerDragState();
+          });
+          row.addEventListener("dragleave", event => {
+            if (!projectLayerDragRowKey) return;
+            const nextTarget = event.relatedTarget;
+            if (nextTarget instanceof Node && row.contains(nextTarget)) return;
+            if (projectLayerDropRowKey !== rowKey) return;
+            row.classList.remove("is-drop-before", "is-drop-after");
+            projectLayerDropRowKey = "";
+            projectLayerDropPlacement = "";
+          });
         }
 
         function getProjectLayerDisplayRows() {
           const rows = [];
-          const groupedUploads = new Map();
-          const manualPointClusters = new Map();
+          const rowsByKey = new Map();
           projectObjects
             .slice()
             .reverse()
             .forEach(item => {
-              const uploadGroupId = String(item?.uploadGroupId || "").trim();
-              if (uploadGroupId) {
-                let container = groupedUploads.get(uploadGroupId);
-                if (!container) {
-                  container = {
-                    kind: "upload-container",
-                    uploadGroupId,
-                    uploadGroupName:
-                      String(item?.uploadGroupName || "").trim() || "Upload",
-                    uploadGroupFormat: String(item?.uploadGroupFormat || "").trim(),
-                    pointClusters: new Map(),
-                    otherItems: []
-                  };
-                  groupedUploads.set(uploadGroupId, container);
-                  rows.push(container);
-                }
-                if (isProjectPointObject(item)) {
-                  const clusterId = getProjectPointClusterId(item);
-                  let clusterRow = container.pointClusters.get(clusterId);
-                  if (!clusterRow) {
-                    clusterRow = { clusterId, items: [] };
-                    container.pointClusters.set(clusterId, clusterRow);
-                  }
-                  clusterRow.items.push(item);
-                } else {
-                  container.otherItems.push(item);
-                }
-                return;
+              const rowKey = getProjectLayerRowKeyForItem(item);
+              if (!rowKey) return;
+              let rowEntry = rowsByKey.get(rowKey);
+              if (!rowEntry) {
+                rowEntry = buildProjectLayerDisplayRowForItem(item);
+                if (!rowEntry) return;
+                rowsByKey.set(rowKey, rowEntry);
+                rows.push(rowEntry);
               }
-              if (isProjectPointObject(item)) {
-                const clusterId = getProjectPointClusterId(item);
-                let clusterRow = manualPointClusters.get(clusterId);
-                if (!clusterRow) {
-                  clusterRow = buildProjectLayerGroupRow({
-                    label: getProjectPointClusterName(clusterId),
-                    typeLabel: "PCL",
-                    items: [],
-                    deleteTitle: "Cluster löschen",
-                    deleteStatus: `${getProjectPointClusterName(clusterId)} gelöscht.`
-                  });
-                  clusterRow.clusterId = clusterId;
-                  manualPointClusters.set(clusterId, clusterRow);
-                  rows.push(clusterRow);
-                }
-                clusterRow.items.push(item);
-                clusterRow.summaryText = [
-                  getProjectLayerGroupedItemLabel(clusterRow.items),
-                  getProjectLayerCommonBufferMeters(clusterRow.items) > 0
-                    ? `Puffer ${getProjectLayerCommonBufferMeters(clusterRow.items)} m`
-                    : ""
-                ]
-                  .filter(Boolean)
-                  .join(" · ");
-                return;
-              }
-              rows.push({ kind: "single", item });
+              if (rowEntry.kind === "single") return;
+              rowEntry.items.push(item);
+              updateProjectLayerGroupRowSummary(rowEntry);
             });
+          return rows;
+        }
 
-          return rows.flatMap(rowEntry => {
-            if (rowEntry?.kind !== "upload-container") return [rowEntry];
-            const flattened = [];
-            Array.from(rowEntry.pointClusters.values())
-              .sort((left, right) => left.clusterId - right.clusterId)
-              .forEach(clusterRow => {
-                flattened.push(
-                  buildProjectLayerGroupRow({
-                    label: `${rowEntry.uploadGroupName} · ${getProjectPointClusterName(clusterRow.clusterId)}`,
-                    typeLabel: "UPL",
-                    items: clusterRow.items,
-                    uploadGroupFormat: rowEntry.uploadGroupFormat,
-                    deleteTitle: "Cluster löschen",
-                    deleteStatus: `${getProjectPointClusterName(clusterRow.clusterId)} aus "${rowEntry.uploadGroupName}" gelöscht.`
-                  })
-                );
-              });
-            if (rowEntry.otherItems.length) {
-              flattened.push(
-                buildProjectLayerGroupRow({
-                  label: rowEntry.uploadGroupName,
-                  typeLabel: "UPL",
-                  items: rowEntry.otherItems,
-                  uploadGroupFormat: rowEntry.uploadGroupFormat,
-                  deleteTitle: "Upload löschen",
-                  deleteStatus: `Upload "${rowEntry.uploadGroupName}" gelöscht.`
-                })
+        function getProjectLegendEntryMode(items) {
+          const targets = (Array.isArray(items) ? items : [items]).filter(item => !!item?.geometry);
+          const modes = Array.from(
+            new Set(
+              targets
+                .map(item => item.mode || getProjectModeFromGeometryType(item?.geometry?.type))
+                .filter(Boolean)
+            )
+          );
+          if (!modes.length) return "point";
+          if (modes.length === 1) return modes[0];
+          return "mixed";
+        }
+
+        function getProjectLegendEntryColorRgb(items) {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          const colorValue =
+            targets.map(item => getProjectObjectDisplayColor(item)).find(Boolean) || projectAccentColor;
+          return projectObjectColorToRgb(colorValue);
+        }
+
+        function buildProjectLegendEntry(items, fallbackLabel = "Objekt") {
+          const targets = (Array.isArray(items) ? items : [items]).filter(item => !!item?.geometry);
+          if (!targets.length) return null;
+          const label = getProjectLegendDisplayLabel(targets, fallbackLabel);
+          if (!label) return null;
+          return {
+            label,
+            mode: getProjectLegendEntryMode(targets),
+            colorRgb: getProjectLegendEntryColorRgb(targets)
+          };
+        }
+
+        function collectProjectExportLegendEntries() {
+          const entries = [];
+          getProjectLayerDisplayRows().forEach(rowEntry => {
+            if (rowEntry?.kind === "group") {
+              const visibleItems = (rowEntry.items || []).filter(
+                item => !!item?.geometry && item.visible !== false
               );
+              const entry = buildProjectLegendEntry(visibleItems, rowEntry.label || "Gruppe");
+              if (entry) entries.push(entry);
+              return;
             }
-            return flattened;
+            const item = rowEntry?.item;
+            if (!item?.geometry || item.visible === false) return;
+            const entry = buildProjectLegendEntry(
+              item,
+              item.name || getProjectObjectTypeLabel(item.mode)
+            );
+            if (entry) entries.push(entry);
           });
+          return entries;
         }
 
         function resetProjectSelectionAfterObjectRemoval() {
@@ -7259,20 +7878,25 @@
               if (rowEntry?.kind === "group") {
                 const items = Array.isArray(rowEntry.items) ? rowEntry.items : [];
                 if (!items.length) return;
+                const rowKey = getProjectLayerRowKey(rowEntry);
+                const rowLabel = rowEntry.label || "Gruppe";
                 const row = document.createElement("div");
                 row.className = "project-layer-item";
                 const anySelected = items.some(item => item.id === projectSelectedObjectId);
                 const allHidden = items.every(item => item.visible === false);
                 if (anySelected) row.classList.add("is-selected");
                 if (allHidden) row.classList.add("is-hidden");
+                attachProjectLayerRowDropEvents(row, rowKey);
+                row.appendChild(createProjectLayerDragHandle(row, rowKey, rowLabel));
 
                 const main = document.createElement("button");
                 main.type = "button";
                 main.className = "project-layer-main";
+                main.draggable = false;
 
                 const name = document.createElement("span");
                 name.className = "project-layer-name";
-                name.textContent = rowEntry.label || "Gruppe";
+                name.textContent = rowLabel;
 
                 const meta = document.createElement("span");
                 meta.className = "project-layer-meta";
@@ -7302,8 +7926,12 @@
                 const actions = document.createElement("div");
                 actions.className = "project-layer-actions";
 
-                const colorBtn = buildProjectColorAction(items, rowEntry.label || "Gruppe");
+                const colorBtn = buildProjectColorAction(items, rowLabel);
                 if (colorBtn) actions.appendChild(colorBtn);
+                const labelBtn = buildProjectLabelAction(items, rowLabel);
+                if (labelBtn) actions.appendChild(labelBtn);
+                const legendBtn = buildProjectLegendAliasAction(items, rowLabel);
+                if (legendBtn) actions.appendChild(legendBtn);
 
                 const visBtn = document.createElement("button");
                 visBtn.type = "button";
@@ -7351,7 +7979,7 @@
                   resetProjectSelectionAfterObjectRemoval();
                   updateProjectAreaSource();
                   setProjectExportStatus(
-                    rowEntry.deleteStatus || `Gruppe "${rowEntry.label || "Gruppe"}" gelöscht.`
+                    rowEntry.deleteStatus || `Gruppe "${rowLabel}" gelöscht.`
                   );
                 });
 
@@ -7365,18 +7993,23 @@
 
               const item = rowEntry?.item;
               if (!item) return;
+              const rowKey = getProjectLayerRowKey(rowEntry);
+              const rowLabel = item.name || getProjectObjectTypeLabel(item.mode);
               const row = document.createElement("div");
               row.className = "project-layer-item";
               if (item.id === projectSelectedObjectId) row.classList.add("is-selected");
               if (item.visible === false) row.classList.add("is-hidden");
+              attachProjectLayerRowDropEvents(row, rowKey);
+              row.appendChild(createProjectLayerDragHandle(row, rowKey, rowLabel));
 
               const main = document.createElement("button");
               main.type = "button";
               main.className = "project-layer-main";
+              main.draggable = false;
 
               const name = document.createElement("span");
               name.className = "project-layer-name";
-              name.textContent = item.name || getProjectObjectTypeLabel(item.mode);
+              name.textContent = rowLabel;
 
               const meta = document.createElement("span");
               meta.className = "project-layer-meta";
@@ -7412,11 +8045,12 @@
               const actions = document.createElement("div");
               actions.className = "project-layer-actions";
 
-              const colorBtn = buildProjectColorAction(
-                item,
-                item.name || getProjectObjectTypeLabel(item.mode)
-              );
+              const colorBtn = buildProjectColorAction(item, rowLabel);
               if (colorBtn) actions.appendChild(colorBtn);
+              const labelBtn = buildProjectLabelAction(item, rowLabel);
+              if (labelBtn) actions.appendChild(labelBtn);
+              const legendBtn = buildProjectLegendAliasAction(item, rowLabel);
+              if (legendBtn) actions.appendChild(legendBtn);
 
               const visBtn = document.createElement("button");
               visBtn.type = "button";
@@ -7519,6 +8153,8 @@
             .filter(item => !!item?.geometry && item.visible !== false)
             .map(item => {
               const pointClusterId = getProjectPointClusterId(item);
+              const labelField = getProjectObjectLabelField(item);
+              const labelText = getProjectObjectLabelText(item);
               return {
                 type: "Feature",
                 properties: {
@@ -7526,6 +8162,8 @@
                   name: item.name || getProjectObjectTypeLabel(item.mode),
                   mode: item.mode || getProjectModeFromGeometryType(item.geometry.type),
                   displayColor: getProjectObjectDisplayColor(item),
+                  labelField: labelField || undefined,
+                  labelText: labelText || undefined,
                   pointClusterId: pointClusterId || undefined,
                   pointClusterName: pointClusterId
                     ? getProjectPointClusterName(pointClusterId)
@@ -7565,16 +8203,26 @@
 
         function buildProjectAreaSourceData() {
           const features = [];
+          const renderOrderById = new Map();
+          projectObjects.forEach((item, index) => {
+            const objectId = String(item?.id || "").trim();
+            if (!objectId) return;
+            renderOrderById.set(objectId, index + 1);
+          });
           projectObjects.forEach(item => {
             if (!item?.geometry || item.visible === false) return;
             const selected = item.id === projectSelectedObjectId;
             const pointClusterId = getProjectPointClusterId(item);
+            const renderOrder = renderOrderById.get(String(item.id || "").trim()) || 0;
+            const rowKey = getProjectLayerRowKeyForItem(item);
             const baseProps = {
               objectId: item.id,
               selected,
               name: item.name || "",
               mode: item.mode || getProjectModeFromGeometryType(item.geometry.type),
               displayColor: getProjectObjectDisplayColor(item),
+              renderOrder,
+              rowKey,
               pointClusterId: pointClusterId || undefined,
               pointClusterName: pointClusterId ? getProjectPointClusterName(pointClusterId) : ""
             };
@@ -7600,14 +8248,30 @@
                 geometry: cloneJson(item.geometry)
               });
             }
+            const labelText = getProjectObjectLabelText(item);
+            const labelAnchor = labelText ? getProjectGeometryLabelAnchorCoord(item.geometry) : null;
+            if (labelText && labelAnchor) {
+              features.push({
+                type: "Feature",
+                properties: { ...baseProps, kind: "object-label", labelText },
+                geometry: { type: "Point", coordinates: labelAnchor }
+              });
+            }
           });
           getProjectMergedBufferEntries(projectObjects, { visibleOnly: true }).forEach(entry => {
+            const renderOrder = Math.max(
+              0,
+              ...(entry.items || []).map(item => renderOrderById.get(String(item?.id || "").trim()) || 0)
+            );
+            const rowKey = getProjectLayerRowKeyForItem(entry.items?.[0] || null);
             const baseProps = {
               objectId: entry.objectId,
               selected: entry.selected,
               name: entry.name || "Verschmolzener Puffer",
               mode: "polygon",
               displayColor: entry.displayColor,
+              renderOrder,
+              rowKey,
               mergedBuffer: true,
               pointClusterId: entry.pointClusterId || undefined,
               pointClusterName: entry.pointClusterName || ""
@@ -7708,6 +8372,9 @@
               type: "fill",
               source: projectSourceId,
               filter: ["==", ["get", "kind"], "object-fill"],
+              layout: {
+                "fill-sort-key": ["coalesce", ["get", "renderOrder"], 0]
+              },
               paint: {
                 "fill-color": ["coalesce", ["get", "displayColor"], projectAccentColor],
                 "fill-opacity": [
@@ -7725,6 +8392,9 @@
               type: "fill",
               source: projectSourceId,
               filter: ["==", ["get", "kind"], "buffer-fill"],
+              layout: {
+                "fill-sort-key": ["coalesce", ["get", "renderOrder"], 0]
+              },
               paint: {
                 "fill-color": ["coalesce", ["get", "displayColor"], projectAccentColor],
                 "fill-opacity": 0.12
@@ -7737,6 +8407,9 @@
               type: "line",
               source: projectSourceId,
               filter: ["==", ["get", "kind"], "object-line"],
+              layout: {
+                "line-sort-key": ["coalesce", ["get", "renderOrder"], 0]
+              },
               paint: {
                 "line-color": ["coalesce", ["get", "displayColor"], projectAccentColor],
                 "line-width": [
@@ -7754,6 +8427,9 @@
               type: "line",
               source: projectSourceId,
               filter: ["==", ["get", "kind"], "buffer-line"],
+              layout: {
+                "line-sort-key": ["coalesce", ["get", "renderOrder"], 0]
+              },
               paint: {
                 "line-color": ["coalesce", ["get", "displayColor"], projectAccentColor],
                 "line-width": 2,
@@ -7780,6 +8456,9 @@
               type: "circle",
               source: projectSourceId,
               filter: ["==", ["get", "kind"], "object-point"],
+              layout: {
+                "circle-sort-key": ["coalesce", ["get", "renderOrder"], 0]
+              },
               paint: {
                 "circle-radius": [
                   "case",
@@ -7790,6 +8469,85 @@
                 "circle-color": ["coalesce", ["get", "displayColor"], projectAccentColor],
                 "circle-stroke-color": "#ffffff",
                 "circle-stroke-width": 2
+              }
+            });
+          }
+          if (!map.getLayer(projectObjectPointLabelLayerId)) {
+            map.addLayer({
+              id: projectObjectPointLabelLayerId,
+              type: "symbol",
+              source: projectSourceId,
+              filter: [
+                "all",
+                ["==", ["get", "kind"], "object-label"],
+                ["==", ["get", "mode"], "point"]
+              ],
+              layout: {
+                "symbol-sort-key": ["coalesce", ["get", "renderOrder"], 0],
+                "text-field": ["get", "labelText"],
+                "text-size": 12,
+                "text-font": ["Open Sans Semibold", "Arial Unicode MS Regular"],
+                "text-variable-anchor": [
+                  "top",
+                  "bottom",
+                  "right",
+                  "left",
+                  "top-right",
+                  "top-left",
+                  "bottom-right",
+                  "bottom-left"
+                ],
+                "text-radial-offset": 1.15,
+                "text-justify": "auto",
+                "text-max-width": 14,
+                "text-padding": 2,
+                "text-allow-overlap": false,
+                "text-ignore-placement": false
+              },
+              paint: {
+                "text-color": ["coalesce", ["get", "displayColor"], "#0f172a"],
+                "text-halo-color": "rgba(255, 255, 255, 0.95)",
+                "text-halo-width": 1.4
+              }
+            });
+          }
+          if (!map.getLayer(projectObjectAreaLabelLayerId)) {
+            map.addLayer({
+              id: projectObjectAreaLabelLayerId,
+              type: "symbol",
+              source: projectSourceId,
+              filter: [
+                "all",
+                ["==", ["get", "kind"], "object-label"],
+                ["!=", ["get", "mode"], "point"]
+              ],
+              layout: {
+                "symbol-sort-key": ["coalesce", ["get", "renderOrder"], 0],
+                "text-field": ["get", "labelText"],
+                "text-size": 12,
+                "text-font": ["Open Sans Semibold", "Arial Unicode MS Regular"],
+                "text-variable-anchor": [
+                  "center",
+                  "top",
+                  "bottom",
+                  "right",
+                  "left",
+                  "top-right",
+                  "top-left",
+                  "bottom-right",
+                  "bottom-left"
+                ],
+                "text-radial-offset": 0,
+                "text-justify": "auto",
+                "text-max-width": 14,
+                "text-padding": 2,
+                "text-allow-overlap": false,
+                "text-ignore-placement": false
+              },
+              paint: {
+                "text-color": ["coalesce", ["get", "displayColor"], "#0f172a"],
+                "text-halo-color": "rgba(255, 255, 255, 0.95)",
+                "text-halo-width": 1.4
               }
             });
           }
@@ -8025,6 +8783,7 @@
           coords,
           name,
           bufferMeters = 0,
+          legendAlias = "",
           pointClusterId = projectPointClusterDefaultId
         }) {
           const nextGeometry = geometry ? cloneJson(geometry) : normalizeDraftGeometry(mode, coords);
@@ -8040,6 +8799,10 @@
             visible: true,
             bufferMeters: Number.isFinite(Number(bufferMeters)) ? Math.max(0, Number(bufferMeters)) : 0
           };
+          const nextLegendAlias = String(legendAlias || "").trim();
+          if (nextLegendAlias) {
+            item.legendAlias = nextLegendAlias;
+          }
           if (nextMode === "point") {
             setProjectPointCluster(item, pointClusterId);
           }
@@ -8204,6 +8967,53 @@
           return Math.abs(sum / 2);
         }
 
+        function ringSignedArea(ring) {
+          if (!Array.isArray(ring) || ring.length < 3) return 0;
+          let sum = 0;
+          for (let i = 0; i < ring.length; i += 1) {
+            const a = normalizeCoord(ring[i]);
+            const b = normalizeCoord(ring[(i + 1) % ring.length]);
+            if (!a || !b) continue;
+            sum += a[0] * b[1] - b[0] * a[1];
+          }
+          return sum / 2;
+        }
+
+        function normalizeProjectPolygonRings(rings) {
+          const normalizedRings = [];
+          (rings || []).forEach((ring, index) => {
+            const closed = toClosedRing(ring);
+            if (closed.length < 4) return;
+            const signedArea = ringSignedArea(closed);
+            const shouldBeClockwise = index > 0;
+            const isClockwise = signedArea < 0;
+            const nextRing =
+              signedArea !== 0 && isClockwise !== shouldBeClockwise
+                ? closed.slice().reverse()
+                : closed.slice();
+            normalizedRings.push(nextRing);
+          });
+          return normalizedRings;
+        }
+
+        function normalizeProjectImportGeometry(geometry) {
+          if (!geometry || typeof geometry !== "object") return null;
+          const type = String(geometry.type || "");
+          if (type === "Polygon") {
+            const rings = normalizeProjectPolygonRings(geometry.coordinates);
+            return rings.length ? { type: "Polygon", coordinates: rings } : null;
+          }
+          if (type === "MultiPolygon") {
+            const polygons = [];
+            (geometry.coordinates || []).forEach(rings => {
+              const normalizedRings = normalizeProjectPolygonRings(rings);
+              if (normalizedRings.length) polygons.push(normalizedRings);
+            });
+            return polygons.length ? { type: "MultiPolygon", coordinates: polygons } : null;
+          }
+          return cloneJson(geometry);
+        }
+
         function extractPrimaryRingFromGeometry(geometry) {
           if (!geometry) return null;
           if (geometry.type === "Polygon") {
@@ -8286,6 +9096,26 @@
           return fallback;
         }
 
+        function getPlacemarkPropertiesFromNode(node, fallback = "Projektgebiet") {
+          const properties = {};
+          const name = getPlacemarkNameFromNode(node, fallback);
+          if (name) {
+            properties.name = name;
+          }
+          getXmlDescendantsByLocalTagName(node, "simpledata").forEach(entry => {
+            const key = String(entry?.getAttribute?.("name") || "").trim();
+            if (!key) return;
+            properties[key] = String(entry.textContent || "").trim();
+          });
+          getXmlDescendantsByLocalTagName(node, "data").forEach(entry => {
+            const key = String(entry?.getAttribute?.("name") || "").trim();
+            if (!key) return;
+            const valueNode = getXmlDescendantsByLocalTagName(entry, "value")[0];
+            properties[key] = String(valueNode?.textContent || "").trim();
+          });
+          return Object.keys(properties).length ? properties : null;
+        }
+
         function parseKmlCoordinateText(text) {
           const out = [];
           String(text || "")
@@ -8311,6 +9141,22 @@
           return Array.from(node?.childNodes || []).filter(child => child?.nodeType === 1);
         }
 
+        function getXmlDescendantsByLocalTagName(node, tagName = "") {
+          const normalizedTag = String(tagName || "").trim().toLowerCase();
+          if (!node || !normalizedTag) return [];
+          const out = [];
+          const queue = getXmlElementChildren(node);
+          while (queue.length) {
+            const current = queue.shift();
+            if (!current) continue;
+            if (getXmlLocalTagName(current) === normalizedTag) {
+              out.push(current);
+            }
+            getXmlElementChildren(current).forEach(child => queue.push(child));
+          }
+          return out;
+        }
+
         function findFirstKmlCoordinatesText(node) {
           if (!node) return "";
           const queue = [node];
@@ -8326,14 +9172,59 @@
           return "";
         }
 
-        function collectProjectImportEntriesFromKmlXmlGeometry(node, placemarkName, out) {
+        function collectKmlBoundaryRings(node, boundaryTag) {
+          const rings = [];
+          if (!node) return rings;
+          const queue = [node];
+          while (queue.length) {
+            const current = queue.shift();
+            if (!current) continue;
+            if (getXmlLocalTagName(current) === boundaryTag) {
+              const ring = toClosedRing(parseKmlCoordinateText(findFirstKmlCoordinatesText(current)));
+              if (ring.length >= 4) rings.push(ring);
+              continue;
+            }
+            getXmlElementChildren(current).forEach(child => queue.push(child));
+          }
+          return rings;
+        }
+
+        function collectKmlPolygonRings(node) {
+          if (!node) return [];
+          const rings = [];
+          const outerRing = collectKmlBoundaryRings(node, "outerboundaryis")[0];
+          if (outerRing) {
+            rings.push(outerRing);
+          } else {
+            const fallbackRing = toClosedRing(
+              parseKmlCoordinateText(findFirstKmlCoordinatesText(node))
+            );
+            if (fallbackRing.length >= 4) rings.push(fallbackRing);
+          }
+          collectKmlBoundaryRings(node, "innerboundaryis").forEach(ring => {
+            if (ring.length >= 4) rings.push(ring);
+          });
+          return normalizeProjectPolygonRings(rings);
+        }
+
+        function collectProjectImportEntriesFromKmlXmlGeometry(
+          node,
+          placemarkName,
+          out,
+          placemarkProperties = null
+        ) {
           if (!node || !Array.isArray(out)) return;
           const tag = getXmlLocalTagName(node);
           if (!tag) return;
 
           if (tag === "multigeometry") {
             getXmlElementChildren(node).forEach(child =>
-              collectProjectImportEntriesFromKmlXmlGeometry(child, placemarkName, out)
+              collectProjectImportEntriesFromKmlXmlGeometry(
+                child,
+                placemarkName,
+                out,
+                placemarkProperties
+              )
             );
             return;
           }
@@ -8344,7 +9235,8 @@
             if (!point) return;
             out.push({
               geometry: { type: "Point", coordinates: point },
-              name: placemarkName
+              name: placemarkName,
+              properties: cloneProjectImportProperties(placemarkProperties)
             });
             return;
           }
@@ -8356,23 +9248,30 @@
             if (coords.length < 2) return;
             out.push({
               geometry: { type: "LineString", coordinates: coords },
-              name: placemarkName
+              name: placemarkName,
+              properties: cloneProjectImportProperties(placemarkProperties)
             });
             return;
           }
 
           if (tag === "polygon") {
-            const ring = toClosedRing(parseKmlCoordinateText(findFirstKmlCoordinatesText(node)));
-            if (ring.length < 4) return;
+            const rings = collectKmlPolygonRings(node);
+            if (!rings.length) return;
             out.push({
-              geometry: { type: "Polygon", coordinates: [ring] },
-              name: placemarkName
+              geometry: { type: "Polygon", coordinates: rings },
+              name: placemarkName,
+              properties: cloneProjectImportProperties(placemarkProperties)
             });
             return;
           }
 
           getXmlElementChildren(node).forEach(child =>
-            collectProjectImportEntriesFromKmlXmlGeometry(child, placemarkName, out)
+            collectProjectImportEntriesFromKmlXmlGeometry(
+              child,
+              placemarkName,
+              out,
+              placemarkProperties
+            )
           );
         }
 
@@ -8387,8 +9286,14 @@
           uniquePlacemarks.forEach((placemarkNode, index) => {
             const fallback = `${defaultName} ${index + 1}`;
             const placemarkName = getPlacemarkNameFromNode(placemarkNode, fallback);
+            const placemarkProperties = getPlacemarkPropertiesFromNode(placemarkNode, fallback);
             getXmlElementChildren(placemarkNode).forEach(child =>
-              collectProjectImportEntriesFromKmlXmlGeometry(child, placemarkName, entries)
+              collectProjectImportEntriesFromKmlXmlGeometry(
+                child,
+                placemarkName,
+                entries,
+                placemarkProperties
+              )
             );
           });
           if (entries.length === 1 && !String(entries[0]?.name || "").trim()) {
@@ -8399,6 +9304,35 @@
 
         function extractPolygonCandidateFromKmlXml(xml) {
           if (!xml) return null;
+          const polygonNodes = [
+            ...Array.from(xml.getElementsByTagName("Polygon")),
+            ...Array.from(xml.getElementsByTagNameNS("*", "Polygon"))
+          ];
+          const uniquePolygonNodes = Array.from(new Set(polygonNodes));
+          let polygonBest = null;
+          uniquePolygonNodes.forEach(node => {
+            const rings = collectKmlPolygonRings(node);
+            const outerRing = rings[0];
+            if (!Array.isArray(outerRing) || outerRing.length < 4) return;
+            const area = ringAreaAbs(outerRing);
+            const name = getPlacemarkNameFromNode(node);
+            const properties = getPlacemarkPropertiesFromNode(node, name);
+            if (!polygonBest || area > polygonBest.area) {
+              polygonBest = {
+                geometry: { type: "Polygon", coordinates: rings },
+                name,
+                properties,
+                area
+              };
+            }
+          });
+          if (polygonBest) {
+            return {
+              geometry: cloneJson(polygonBest.geometry),
+              name: polygonBest.name,
+              properties: cloneProjectImportProperties(polygonBest.properties)
+            };
+          }
           const coordinateNodes = [
             ...Array.from(xml.getElementsByTagName("coordinates")),
             ...Array.from(xml.getElementsByTagNameNS("*", "coordinates"))
@@ -8412,11 +9346,21 @@
             if (ring.length < 4) return;
             const area = ringAreaAbs(ring);
             const name = getPlacemarkNameFromNode(node);
+            const properties = getPlacemarkPropertiesFromNode(node, name);
             if (!best || area > best.area) {
-              best = { ring, name, area };
+              best = { ring, name, properties, area };
             }
           });
-          return best ? { ring: best.ring, name: best.name } : null;
+          return best
+            ? {
+                geometry: {
+                  type: "Polygon",
+                  coordinates: normalizeProjectPolygonRings([best.ring])
+                },
+                name: best.name,
+                properties: cloneProjectImportProperties(best.properties)
+              }
+            : null;
         }
 
         async function readKmlTextCandidatesFromFile(file) {
@@ -8868,7 +9812,8 @@
             entries.push({
               geometry: { type: "Point", coordinates: point },
               name: getProjectImportFeatureName(row, fallbackName),
-              bufferMeters: importConfig.bufferMeters
+              bufferMeters: importConfig.bufferMeters,
+              properties: cloneProjectImportProperties(row)
             });
           });
 
@@ -8909,20 +9854,21 @@
 
         function collectProjectImportEntriesFromGeoJson(node, defaultName = "") {
           const entries = [];
-          function pushGeometryEntry(geometry, name = "") {
-            const nextGeometry = geometry ? cloneJson(geometry) : null;
+          function pushGeometryEntry(geometry, name = "", properties = null) {
+            const nextGeometry = normalizeProjectImportGeometry(geometry);
             if (!nextGeometry || !isSupportedProjectImportGeometryType(nextGeometry.type)) return;
             if (!getGeometryBounds(nextGeometry)) return;
             entries.push({
               geometry: nextGeometry,
-              name: String(name || "").trim()
+              name: String(name || "").trim(),
+              properties: cloneProjectImportProperties(properties)
             });
           }
 
-          function visit(value, fallbackName = "") {
+          function visit(value, fallbackName = "", inheritedProperties = null) {
             if (!value) return;
             if (Array.isArray(value)) {
-              value.forEach(item => visit(item, fallbackName));
+              value.forEach(item => visit(item, fallbackName, inheritedProperties));
               return;
             }
             const type = String(value.type || "").trim();
@@ -8930,39 +9876,54 @@
             if (type === "FeatureCollection") {
               (value.features || []).forEach(feature => {
                 const featureName = getProjectImportFeatureName(feature?.properties, fallbackName);
-                visit(feature, featureName);
+                visit(feature, featureName, feature?.properties || inheritedProperties);
               });
               return;
             }
             if (type === "Feature") {
-              const featureName = getProjectImportFeatureName(value.properties, fallbackName);
-              visit(value.geometry, featureName);
+              const featureProperties = value.properties || inheritedProperties;
+              const featureName = getProjectImportFeatureName(featureProperties, fallbackName);
+              visit(value.geometry, featureName, featureProperties);
               return;
             }
             if (type === "GeometryCollection") {
-              (value.geometries || []).forEach(geometry => visit(geometry, fallbackName));
+              (value.geometries || []).forEach(geometry =>
+                visit(geometry, fallbackName, inheritedProperties)
+              );
               return;
             }
             if (!isSupportedProjectImportGeometryType(type)) return;
             if (type === "MultiPoint") {
               (value.coordinates || []).forEach(coord => {
-                pushGeometryEntry({ type: "Point", coordinates: coord }, fallbackName);
+                pushGeometryEntry(
+                  { type: "Point", coordinates: coord },
+                  fallbackName,
+                  inheritedProperties
+                );
               });
               return;
             }
             if (type === "MultiLineString") {
               (value.coordinates || []).forEach(lineCoords => {
-                pushGeometryEntry({ type: "LineString", coordinates: lineCoords }, fallbackName);
+                pushGeometryEntry(
+                  { type: "LineString", coordinates: lineCoords },
+                  fallbackName,
+                  inheritedProperties
+                );
               });
               return;
             }
             if (type === "MultiPolygon") {
               (value.coordinates || []).forEach(polygonCoords => {
-                pushGeometryEntry({ type: "Polygon", coordinates: polygonCoords }, fallbackName);
+                pushGeometryEntry(
+                  { type: "Polygon", coordinates: polygonCoords },
+                  fallbackName,
+                  inheritedProperties
+                );
               });
               return;
             }
-            pushGeometryEntry(value, fallbackName);
+            pushGeometryEntry(value, fallbackName, inheritedProperties);
           }
 
           visit(node, "");
@@ -9023,8 +9984,9 @@
           if (!isProjectPointObject(item)) return false;
           const nextClusterId = normalizeProjectPointClusterId(clusterId);
           const nextClusterName = getProjectPointClusterName(nextClusterId);
-          const nextClusterColor = getProjectPointClusterColor(nextClusterId);
-          projectPointClusterColorOverrides.set(nextClusterId, nextClusterColor);
+          const nextColorKey = getProjectPointClusterColorKey(nextClusterId, item);
+          const nextClusterColor = getProjectPointClusterColor(nextClusterId, item);
+          projectPointClusterColorOverrides.set(nextColorKey, nextClusterColor);
           let changed = false;
           if (
             Number(item?.pointClusterId) !== nextClusterId ||
@@ -9531,6 +10493,7 @@
             if (!geometry || !isSupportedProjectImportGeometryType(geometry.type)) return;
             if (!getGeometryBounds(geometry)) return;
             const mode = getProjectModeFromGeometryType(geometry.type);
+            const importProperties = cloneProjectImportProperties(entry?.properties);
             const providedName = String(entry?.name || "").trim();
             const uploadGroupId = String(entry?.uploadGroupId || uploadGroupIdDefault).trim();
             const uploadGroupName = String(entry?.uploadGroupName || uploadGroupNameDefault).trim();
@@ -9550,6 +10513,17 @@
                   ? Math.max(0, defaultBufferMeters)
                   : 0
             };
+            if (importProperties) {
+              item.importProperties = importProperties;
+            }
+            const labelField = String(entry?.labelField || "").trim();
+            if (labelField) {
+              item.labelField = labelField;
+            }
+            const legendAlias = String(entry?.legendAlias || "").trim();
+            if (legendAlias) {
+              item.legendAlias = legendAlias;
+            }
             if (mode === "point") {
               setProjectPointCluster(item, entry?.pointClusterId);
             }
@@ -9607,12 +10581,11 @@
             }
 
             const extracted = extractPolygonCandidateFromKmlXml(xml);
-            if (!extracted || !Array.isArray(extracted.ring) || extracted.ring.length < 3) return;
-            const ring = toClosedRing(extracted.ring);
-            if (ring.length < 4) return;
+            if (!extracted?.geometry) return;
             entries.push({
-              geometry: { type: "Polygon", coordinates: [ring] },
-              name: String(extracted.name || fallbackName).trim() || fallbackName
+              geometry: cloneJson(extracted.geometry),
+              name: String(extracted.name || fallbackName).trim() || fallbackName,
+              properties: cloneProjectImportProperties(extracted.properties)
             });
           });
 
@@ -10173,17 +11146,11 @@
           const feature = featureOverride || projectAreaFeature;
           if (!feature?.geometry || !isPolygonGeometryType(feature.geometry.type)) return "";
           const geometry = feature.geometry;
-          let ring = null;
-          if (geometry.type === "Polygon") {
-            ring = geometry.coordinates?.[0];
-          } else if (geometry.type === "MultiPolygon") {
-            ring = geometry.coordinates?.[0]?.[0];
-          }
-          if (!Array.isArray(ring) || ring.length < 4) return "";
           const title =
             String(nameOverride || feature?.properties?.name || "Projektgebiet").trim() ||
             "Projektgebiet";
-          const coords = polygonRingToKmlCoords(ring);
+          const geometryMarkup = geometryToKmlMarkup(geometry);
+          if (!geometryMarkup) return "";
           return `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
@@ -10195,13 +11162,7 @@
     <Placemark>
       <name>${kmlEscape(title)}</name>
       <styleUrl>#projektgebiet-style</styleUrl>
-      <Polygon>
-        <outerBoundaryIs>
-          <LinearRing>
-            <coordinates>${coords}</coordinates>
-          </LinearRing>
-        </outerBoundaryIs>
-      </Polygon>
+      ${geometryMarkup}
     </Placemark>
   </Document>
 </kml>`;
@@ -10759,9 +11720,9 @@
           return out;
         }
 
-        function getProjectAreaProjectedRings(targetMap) {
-          if (!projectAreaFeature?.geometry) return [];
-          const rings = collectProjectAreaOuterRingsFromGeometry(projectAreaFeature.geometry, []);
+        function getProjectAreaProjectedRings(targetMap, featureOverride = projectAreaFeature) {
+          if (!featureOverride?.geometry) return [];
+          const rings = collectProjectAreaOuterRingsFromGeometry(featureOverride.geometry, []);
           return projectRingsToMapPixels(targetMap, rings);
         }
 
@@ -10857,12 +11818,33 @@
           return out;
         }
 
-        function getProjectedRasterFramesForOverlay(targetMap) {
+        function collectProjectedProjectExportLabelShape(targetMap, item, out = []) {
+          if (!item?.geometry || !Array.isArray(out)) return out;
+          const text = getProjectObjectLabelText(item);
+          if (!text) return out;
+          const anchorCoord = getProjectGeometryLabelAnchorCoord(item.geometry);
+          const point = projectCoordToMapPixel(targetMap, anchorCoord);
+          if (!point) return out;
+          out.push({
+            kind: "label",
+            point,
+            text,
+            mode: item.mode || getProjectModeFromGeometryType(item.geometry.type),
+            colorRgb: projectObjectColorToRgb(getProjectObjectDisplayColor(item))
+          });
+          return out;
+        }
+
+        function getProjectedRasterFramesForOverlay(
+          targetMap,
+          rasterFrames = projectExportRasterFrames
+        ) {
           const frames = [];
-          if (!isProjectExportRasterMode() || !projectExportRasterFrames.length) {
+          const frameEntries = Array.isArray(rasterFrames) ? rasterFrames : [];
+          if (!isProjectExportRasterMode() || !frameEntries.length) {
             return frames;
           }
-          projectExportRasterFrames.forEach((entry, index) => {
+          frameEntries.forEach((entry, index) => {
             const bounds = isValidBounds(entry?.bounds) ? entry.bounds : null;
             if (!bounds) return;
             const previewFrameBounds = insetBounds(bounds) || cloneJson(bounds);
@@ -10896,7 +11878,8 @@
 
         function getProjectExportProjectedShapes(targetMap, options = {}) {
           const shapes = [];
-          const visibleItems = projectObjects.filter(item => !!item?.geometry && item.visible !== false);
+          const sourceItems = Array.isArray(options?.projectItems) ? options.projectItems : projectObjects;
+          const visibleItems = sourceItems.filter(item => !!item?.geometry && item.visible !== false);
           getProjectMergedBufferEntries(visibleItems, { visibleOnly: false }).forEach(entry => {
             collectProjectedProjectExportShapesFromGeometry(
               targetMap,
@@ -10913,9 +11896,15 @@
               shapes,
               colorRgb
             );
+            collectProjectedProjectExportLabelShape(targetMap, item, shapes);
           });
           if (options.includeRasterFrames === true) {
-            shapes.push(...getProjectedRasterFramesForOverlay(targetMap));
+            shapes.push(
+              ...getProjectedRasterFramesForOverlay(
+                targetMap,
+                Array.isArray(options?.rasterFrames) ? options.rasterFrames : projectExportRasterFrames
+              )
+            );
           }
           return shapes;
         }
@@ -11075,8 +12064,38 @@
                   return;
                 }
                 if (shape?.kind === "point") {
-                  drawPoint(shape.point, 1.55, [255, 255, 255], [255, 255, 255], 0.35);
-                  drawPoint(shape.point, 1.05, shape.colorRgb || projectAccentRgb, [255, 255, 255], 0.35);
+                  drawPoint(shape.point, 1.28, [255, 255, 255], [255, 255, 255], 0.22);
+                  drawPoint(shape.point, 1.02, shape.colorRgb || projectAccentRgb, [255, 255, 255], 0.22);
+                  return;
+                }
+                if (shape?.kind === "label") {
+                  const label = String(shape?.text || "").trim();
+                  const mmPoint = toMmPoint(shape?.point);
+                  if (!label || !mmPoint) return;
+                  const textColor = Array.isArray(shape?.colorRgb) ? shape.colorRgb : [15, 23, 42];
+                  const textY = mmPoint[1] + (shape?.mode === "point" ? -2.4 : 0);
+                  const haloOffsets = [
+                    [-0.22, 0],
+                    [0.22, 0],
+                    [0, -0.22],
+                    [0, 0.22]
+                  ];
+                  doc.setFont("helvetica", "bold");
+                  doc.setFontSize(8.4);
+                  doc.setTextColor(255, 255, 255);
+                  haloOffsets.forEach(([offsetX, offsetY]) => {
+                    doc.text(label, mmPoint[0] + offsetX, textY + offsetY, {
+                      align: "center",
+                      baseline: "middle"
+                    });
+                  });
+                  doc.setTextColor(textColor[0], textColor[1], textColor[2]);
+                  doc.text(label, mmPoint[0], textY, {
+                    align: "center",
+                    baseline: "middle"
+                  });
+                  doc.setTextColor(0, 0, 0);
+                  doc.setFont("helvetica", "normal");
                   return;
                 }
                 const points = Array.isArray(shape?.points) ? shape.points : [];
@@ -11176,6 +12195,19 @@
             : getActiveProjectExportBounds();
           if (!bounds) throw new Error("Kein Export-Ausschnitt verfügbar.");
           const includeRasterFrames = options?.includeRasterFrames === true;
+          const renderState = options?.renderState || null;
+          const renderItems = getProjectObjectsForRenderState(renderState);
+          const renderVisibleItems = renderItems.filter(item => item?.visible !== false);
+          const renderAreaFeature = getProjectAreaFeatureFromObjects(
+            renderVisibleItems,
+            projectSelectedObjectId
+          );
+          const renderBasemapId = resolveProjectExportRenderBasemapId(renderState);
+          const renderBasemap = basemapById.get(renderBasemapId) || currentBasemap || basemap;
+          const renderAlkisEnabled =
+            renderState && Object.prototype.hasOwnProperty.call(renderState, "alkisEnabled")
+              ? renderState.alkisEnabled === true
+              : alkisEnabled;
           const pdfOptions = getExportPdfOptions();
           const container = document.createElement("div");
           container.style.position = "fixed";
@@ -11188,7 +12220,7 @@
           document.body.appendChild(container);
           let exportMap = null;
           try {
-            const basemapStyle = getBasemapStyle(currentBasemap);
+            const basemapStyle = getBasemapStyle(renderBasemap);
             const exportStyle =
               typeof basemapStyle === "string"
                 ? basemapStyle
@@ -11228,7 +12260,7 @@
             } else {
               exportMap.fitBounds(bounds, { padding: 0, duration: 0 });
             }
-            if (alkisEnabled && alkisEligible) {
+            if (renderAlkisEnabled && alkisEligible) {
               addAlkisOverlayToMap(exportMap);
             }
             await waitForMapIdle(exportMap, 12000);
@@ -11244,9 +12276,11 @@
               ),
               sourceWidthPx,
               sourceHeightPx,
-              projectAreaRingsPx: getProjectAreaProjectedRings(exportMap),
+              projectAreaRingsPx: getProjectAreaProjectedRings(exportMap, renderAreaFeature),
               projectOverlayShapesPx: getProjectExportProjectedShapes(exportMap, {
-                includeRasterFrames
+                includeRasterFrames,
+                projectItems: renderItems,
+                rasterFrames: projectExportRasterFrames
               })
             };
           } finally {
@@ -12643,9 +13677,11 @@
               }
               const pdfPages = [];
               const currentScale = getExportScaleDenominator();
+              const overviewRenderState = captureProjectExportRenderState();
               setProjectExportStatus("Übersichtsseite wird gerendert ...");
               const overviewSnapshot = await captureProjectMapImage(exportBounds, {
-                includeRasterFrames: true
+                includeRasterFrames: true,
+                renderState: overviewRenderState
               });
               const overviewPage = await buildProjectPlanTemplatePdfPageOptions(
                 overviewSnapshot,
@@ -12666,7 +13702,9 @@
                 setProjectExportStatus(
                   `Rasterseite ${idx + 1}/${rasterFrameBoundsList.length} wird gerendert ...`
                 );
-                const frameSnapshot = await captureProjectMapImage(frameBounds);
+                const frameSnapshot = await captureProjectMapImage(frameBounds, {
+                  renderState: projectExportRasterFrames[idx]?.renderState || null
+                });
                 const frameScale = normalizeExportScaleDenominator(
                   projectExportRasterFrames[idx]?.scale,
                   currentScale
@@ -17130,16 +18168,10 @@
           enforceMercatorProjection();
           disableTerrain();
           updateAlkisAvailability();
-          ensureMeasureLayers();
-          updateMeasureSource();
-          updateMeasureLabel();
-          ensureProjectAreaLayers();
-          updateProjectAreaSource();
-          if (projectExportFrameActive) {
-            ensureProjectExportFrameLayers();
-            updateProjectExportFramePreview({ syncToMapCenter: false });
-          }
+          restoreProjectOverlayLayersAfterStyleChange();
           handleViewChange();
+          bringProjectOverlayLayersToFront();
+          scheduleProjectOverlayRestoreAfterStyleChange();
         }
 
         map.on("load", handleStyleLoad);

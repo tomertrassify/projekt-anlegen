@@ -95,6 +95,12 @@
     return `rgb(${values[0] || 0}, ${values[1] || 0}, ${values[2] || 0})`;
   }
 
+  function rgbaToCss(color, alpha = 1) {
+    const values = Array.isArray(color) ? color : [0, 0, 0];
+    const safeAlpha = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1;
+    return `rgba(${values[0] || 0}, ${values[1] || 0}, ${values[2] || 0}, ${safeAlpha})`;
+  }
+
   function getWebFontCacheKey(item) {
     return JSON.stringify([
       String(item?.webFontFamily || ""),
@@ -348,15 +354,68 @@
       .filter(Boolean);
   }
 
+  function clampColorChannel(value, fallback = 0) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return fallback;
+    return Math.max(0, Math.min(255, Math.round(numeric)));
+  }
+
+  function normalizeLegendEntries(entries) {
+    return (Array.isArray(entries) ? entries : [])
+      .map(entry => {
+        const label = normalizeMultilineText(entry?.label);
+        if (!label) return null;
+        const modeRaw = String(entry?.mode || "").trim().toLowerCase();
+        const mode =
+          modeRaw === "line" || modeRaw === "polygon" || modeRaw === "mixed" ? modeRaw : "point";
+        const colorSource =
+          Array.isArray(entry?.colorRgb) && entry.colorRgb.length >= 3
+            ? entry.colorRgb
+            : Array.isArray(entry?.color) && entry.color.length >= 3
+              ? entry.color
+              : [15, 23, 42];
+        return {
+          label,
+          mode,
+          colorRgb: [
+            clampColorChannel(colorSource[0], 15),
+            clampColorChannel(colorSource[1], 23),
+            clampColorChannel(colorSource[2], 42)
+          ]
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function buildLegendSection(meta) {
+    if (meta?.legendEnabled !== true) return null;
+    const entries = normalizeLegendEntries(meta?.legendEntries);
+    if (!entries.length) return null;
+    return {
+      kind: "legend",
+      label: normalizeMultilineText(meta?.legendTitle || "Legende") || "Legende",
+      entries
+    };
+  }
+
+  function appendLegendSection(sections, meta) {
+    const resolved = Array.isArray(sections) ? sections.slice() : [];
+    const legendSection = buildLegendSection(meta);
+    if (legendSection) {
+      resolved.push(legendSection);
+    }
+    return resolved;
+  }
+
   function getInfoBlockSections(item, meta) {
-    return resolveInfoSections(item?.sections, meta);
+    return appendLegendSection(resolveInfoSections(item?.sections, meta), meta);
   }
 
   function getInfoColumnsBlockSections(item, meta) {
     return {
       leftSections: resolveInfoSections(item?.leftSections, meta),
       rightSections: resolveInfoSections(item?.rightSections, meta),
-      footerSections: resolveInfoSections(item?.footerSections, meta)
+      footerSections: appendLegendSection(resolveInfoSections(item?.footerSections, meta), meta)
     };
   }
 
@@ -364,6 +423,141 @@
     return `${String(style || "normal")} ${String(weight ?? 400)} ${sizePx}px "${String(
       family || FONT_FAMILY || "Helvetica"
     )}", Helvetica, Arial, sans-serif`;
+  }
+
+  function drawLegendSymbolOnCanvas(ctx, entry, x, centerY, sizePx) {
+    if (!ctx) return;
+    const size = Math.max(8, Number(sizePx) || 12);
+    const left = Number(x) || 0;
+    const top = centerY - size / 2;
+    const colorRgb = Array.isArray(entry?.colorRgb) ? entry.colorRgb : [15, 23, 42];
+    const strokeCss = rgbToCss(colorRgb);
+    const fillCss = rgbaToCss(colorRgb, 0.18);
+    const mode = String(entry?.mode || "point").trim().toLowerCase();
+    ctx.save();
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    if (mode === "polygon" || mode === "mixed") {
+      const inset = mode === "mixed" ? size * 0.2 : size * 0.1;
+      const boxSize = Math.max(3, size - inset * 2);
+      ctx.fillStyle = fillCss;
+      ctx.strokeStyle = strokeCss;
+      ctx.lineWidth = Math.max(1.1, size * 0.09);
+      ctx.beginPath();
+      ctx.rect(left + inset, top + inset, boxSize, boxSize);
+      ctx.fill();
+      ctx.stroke();
+    }
+    if (mode === "line" || mode === "mixed") {
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.92)";
+      ctx.lineWidth = Math.max(2.2, size * 0.34);
+      ctx.beginPath();
+      ctx.moveTo(left + size * 0.08, centerY);
+      ctx.lineTo(left + size * 0.92, centerY);
+      ctx.stroke();
+      ctx.strokeStyle = strokeCss;
+      ctx.lineWidth = Math.max(1.4, size * 0.16);
+      ctx.beginPath();
+      ctx.moveTo(left + size * 0.08, centerY);
+      ctx.lineTo(left + size * 0.92, centerY);
+      ctx.stroke();
+    }
+    if (mode === "point" || mode === "mixed") {
+      const radius = mode === "mixed" ? size * 0.18 : size * 0.26;
+      ctx.fillStyle = strokeCss;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.96)";
+      ctx.lineWidth = Math.max(1.5, size * 0.14);
+      ctx.beginPath();
+      ctx.arc(left + size / 2, centerY, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawLegendEntriesOnCanvas({
+    ctx,
+    entries,
+    startX,
+    startY,
+    maxHeight,
+    contentWidth,
+    valueFont,
+    valueColor,
+    valueLineHeightPx
+  }) {
+    let cursorY = Math.max(0, Number(startY) || 0);
+    const x = Number(startX) || 0;
+    const width = Math.max(1, Number(contentWidth) || 0);
+    const limitY = Math.max(0, Number(maxHeight) || 0);
+    const symbolSizePx = Math.max(10, valueLineHeightPx * 0.92);
+    const symbolGapPx = Math.max(6, symbolSizePx * 0.55);
+    const itemGapPx = Math.max(3, valueLineHeightPx * 0.24);
+    const textX = x + symbolSizePx + symbolGapPx;
+    const textWidth = Math.max(1, width - symbolSizePx - symbolGapPx);
+    const minValueSpace = valueLineHeightPx * 0.6;
+    ctx.font = valueFont;
+    ctx.fillStyle = valueColor;
+    let hiddenCount = 0;
+
+    for (let entryIndex = 0; entryIndex < entries.length; entryIndex += 1) {
+      const remainingEntries = entries.length - entryIndex;
+      const remainingHeight = limitY - cursorY;
+      if (remainingHeight <= minValueSpace) {
+        hiddenCount = remainingEntries;
+        break;
+      }
+      const reservedGap = entryIndex === entries.length - 1 ? 0 : itemGapPx;
+      const availableHeight = Math.max(0, limitY - cursorY - reservedGap);
+      if (availableHeight <= minValueSpace) {
+        hiddenCount = remainingEntries;
+        break;
+      }
+      const entryLabel = normalizeMultilineText(entries[entryIndex]?.label);
+      if (!entryLabel) continue;
+      const entryLines = clampCanvasTextLines(
+        ctx,
+        splitCanvasTextToWidth(ctx, entryLabel, textWidth),
+        Math.max(1, Math.floor(availableHeight / Math.max(valueLineHeightPx, 1))),
+        textWidth
+      );
+      const textHeight = Math.max(valueLineHeightPx, entryLines.length * valueLineHeightPx);
+      const rowHeight = Math.min(Math.max(symbolSizePx, textHeight), availableHeight);
+      const rowSymbolSizePx = Math.min(symbolSizePx, rowHeight);
+      if (rowHeight < Math.min(symbolSizePx, textHeight) * 0.72) {
+        hiddenCount = remainingEntries;
+        break;
+      }
+      const symbolCenterY = cursorY + rowHeight / 2;
+      drawLegendSymbolOnCanvas(ctx, entries[entryIndex], x, symbolCenterY, rowSymbolSizePx);
+      const textStartY = cursorY + Math.max(0, (rowHeight - textHeight) / 2);
+      ctx.fillStyle = valueColor;
+      entryLines.forEach((line, lineIndex) => {
+        ctx.fillText(line, textX, textStartY + lineIndex * valueLineHeightPx);
+      });
+      cursorY += rowHeight;
+      if (entryIndex !== entries.length - 1) {
+        cursorY += Math.min(itemGapPx, Math.max(0, limitY - cursorY));
+      }
+    }
+
+    if (hiddenCount > 0) {
+      const remainingHeight = limitY - cursorY;
+      if (remainingHeight > minValueSpace) {
+        const hint = `+ ${hiddenCount} weitere`;
+        const hintLines = clampCanvasTextLines(
+          ctx,
+          splitCanvasTextToWidth(ctx, hint, width),
+          Math.max(1, Math.floor(remainingHeight / Math.max(valueLineHeightPx, 1))),
+          width
+        );
+        hintLines.forEach((line, lineIndex) => {
+          ctx.fillText(line, x, cursorY + lineIndex * valueLineHeightPx);
+        });
+        cursorY += hintLines.length * valueLineHeightPx;
+      }
+    }
+    return cursorY;
   }
 
   function drawInfoSectionsOnCanvas({
@@ -416,16 +610,30 @@
       const reservedGap = isLastSection ? 0 : sectionGapPx;
       const availableValueHeight = Math.max(0, limitY - cursorY - reservedGap);
       if (availableValueHeight <= minValueSpace) break;
-      const valueLines = clampCanvasTextLines(
-        ctx,
-        splitCanvasTextToWidth(ctx, section.value, width),
-        Math.max(1, Math.floor(availableValueHeight / Math.max(valueLineHeightPx, 1))),
-        width
-      );
-      valueLines.forEach((line, lineIndex) => {
-        ctx.fillText(line, x, cursorY + lineIndex * valueLineHeightPx);
-      });
-      cursorY += valueLines.length * valueLineHeightPx;
+      if (section?.kind === "legend" && Array.isArray(section.entries) && section.entries.length) {
+        cursorY = drawLegendEntriesOnCanvas({
+          ctx,
+          entries: section.entries,
+          startX: x,
+          startY: cursorY,
+          maxHeight: limitY,
+          contentWidth: width,
+          valueFont,
+          valueColor,
+          valueLineHeightPx
+        });
+      } else {
+        const valueLines = clampCanvasTextLines(
+          ctx,
+          splitCanvasTextToWidth(ctx, section.value, width),
+          Math.max(1, Math.floor(availableValueHeight / Math.max(valueLineHeightPx, 1))),
+          width
+        );
+        valueLines.forEach((line, lineIndex) => {
+          ctx.fillText(line, x, cursorY + lineIndex * valueLineHeightPx);
+        });
+        cursorY += valueLines.length * valueLineHeightPx;
+      }
 
       if (!isLastSection) {
         cursorY += Math.min(sectionGapPx, Math.max(0, limitY - cursorY));
@@ -545,7 +753,16 @@
 
   function flattenInfoBlockText(item, meta) {
     return getInfoBlockSections(item, meta)
-      .map(section => `${section.label}\n${section.value}`)
+      .map(section => {
+        if (section?.kind === "legend") {
+          const entryText = (section.entries || [])
+            .map(entry => normalizeMultilineText(entry?.label))
+            .filter(Boolean)
+            .join("\n");
+          return entryText ? `${section.label}\n${entryText}` : section.label;
+        }
+        return `${section.label}\n${section.value}`;
+      })
       .join("\n\n");
   }
 
@@ -712,7 +929,20 @@
   function flattenInfoColumnsBlockText(item, meta) {
     const { leftSections, rightSections, footerSections } = getInfoColumnsBlockSections(item, meta);
     return [leftSections, rightSections, footerSections]
-      .map(sections => sections.map(section => `${section.label}\n${section.value}`).join("\n\n"))
+      .map(sections =>
+        sections
+          .map(section => {
+            if (section?.kind === "legend") {
+              const entryText = (section.entries || [])
+                .map(entry => normalizeMultilineText(entry?.label))
+                .filter(Boolean)
+                .join("\n");
+              return entryText ? `${section.label}\n${entryText}` : section.label;
+            }
+            return `${section.label}\n${section.value}`;
+          })
+          .join("\n\n")
+      )
       .filter(Boolean)
       .join("\n\n");
   }
@@ -1343,8 +1573,9 @@
             ? options.resolveText(item, options.meta || {}, options.baseName || "")
             : String(item.templateText ?? item.text ?? "");
         const hasExtendedChars = /[^\u0000-\u007f]/.test(String(text || ""));
+        const hasEmbeddedPdfFont = getPdfFontFamily(doc) !== PDF_FONT_FALLBACK;
         const forcePdfForExtendedChars =
-          item.preferPdfForExtendedChars === true && hasExtendedChars;
+          item.preferPdfForExtendedChars === true && hasExtendedChars && hasEmbeddedPdfFont;
         if (item.renderMode === "raster" && !forcePdfForExtendedChars) {
           const textDataUrl = await rasterizeTextItemToDataUrl(item, text);
           if (textDataUrl) {
