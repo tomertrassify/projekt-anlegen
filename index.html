@@ -733,8 +733,23 @@
       <div class="project-layer-header">
         <strong id="project-layer-title">Objekte (0)</strong>
         <div class="project-layer-header-actions">
-          <button id="project-layer-kml-download" type="button">KML Download</button>
-          <button id="project-layer-clear-all" type="button">Alle löschen</button>
+          <button
+            id="project-layer-kml-download"
+            type="button"
+            aria-label="KML herunterladen"
+            title="KML herunterladen"
+          >
+            <span class="project-layer-header-icon project-layer-header-icon--download" aria-hidden="true"></span>
+          </button>
+          <button
+            id="project-layer-clear-all"
+            type="button"
+            aria-label="Alle Objekte löschen"
+            title="Alle Objekte löschen"
+            disabled
+          >
+            <span class="project-layer-header-icon project-layer-header-icon--trash" aria-hidden="true"></span>
+          </button>
         </div>
       </div>
       <div id="project-layer-list" class="project-layer-list"></div>
@@ -3822,28 +3837,6 @@
           }
         }
 
-        function buildProjectColorAction(items, label = "Objekt") {
-          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
-          if (!targets.length) return null;
-          const colorBtn = document.createElement("button");
-          colorBtn.type = "button";
-          colorBtn.className = "project-layer-action project-layer-action--color";
-          colorBtn.dataset.action = "color";
-          colorBtn.title = "Farbe ändern";
-          colorBtn.setAttribute("aria-label", `Farbe für ${label} ändern`);
-
-          const swatch = document.createElement("span");
-          swatch.className = "project-layer-color-swatch";
-          swatch.style.setProperty("--project-layer-object-color", getProjectObjectDisplayColor(targets[0]));
-          colorBtn.appendChild(swatch);
-
-          colorBtn.addEventListener("click", () => {
-            openProjectObjectsColorPicker(targets, label);
-          });
-
-          return colorBtn;
-        }
-
         function getProjectObjectAttributeProperties(item) {
           const properties = item?.importProperties;
           return properties && typeof properties === "object" && !Array.isArray(properties)
@@ -3899,7 +3892,7 @@
           const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
           if (!targets.length) return "";
           const firstAlias = getProjectObjectLegendAlias(targets[0]);
-          if (targets.every(item => getProjectObjectLegendAlias(item) === firstAlias)) {
+          if (firstAlias && targets.every(item => getProjectObjectLegendAlias(item) === firstAlias)) {
             return firstAlias;
           }
           return "";
@@ -3907,9 +3900,11 @@
 
         function getProjectLegendDisplayLabel(items, fallbackLabel = "Objekt") {
           const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
-          if (!targets.length) return String(fallbackLabel || "").trim() || "Objekt";
           const alias = getProjectCommonLegendAlias(targets);
           if (alias) return alias;
+          const directFallback = String(fallbackLabel || "").trim();
+          if (directFallback) return directFallback;
+          if (!targets.length) return "Objekt";
           if (targets.length === 1) {
             const item = targets[0];
             const directName = String(item?.name || "").trim();
@@ -3919,7 +3914,7 @@
             );
             if (modeLabel) return modeLabel;
           }
-          return String(fallbackLabel || "").trim() || "Objekt";
+          return "Objekt";
         }
 
         function canProjectObjectsUseLabels(items) {
@@ -3946,84 +3941,251 @@
           return true;
         }
 
-        function applyProjectObjectLegendAlias(items, legendAlias = "", label = "Objekt") {
+        function getProjectCommonUploadGroupName(items) {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!targets.length) return "";
+          const firstName = String(targets[0]?.uploadGroupName || "").trim();
+          if (
+            firstName &&
+            targets.every(item => String(item?.uploadGroupName || "").trim() === firstName)
+          ) {
+            return firstName;
+          }
+          return "";
+        }
+
+        function getProjectCommonPointClusterLabel(items) {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!targets.length || !targets.every(item => isProjectPointObject(item))) return "";
+          const firstId = getProjectPointClusterId(targets[0]);
+          if (!firstId || !targets.every(item => getProjectPointClusterId(item) === firstId)) {
+            return "";
+          }
+          const defaultName = getProjectPointClusterName(firstId);
+          const firstName = String(targets[0]?.pointClusterName || defaultName).trim() || defaultName;
+          if (
+            targets.every(
+              item =>
+                (String(item?.pointClusterName || defaultName).trim() || defaultName) === firstName
+            )
+          ) {
+            return firstName;
+          }
+          return "";
+        }
+
+        function getProjectRenameValue(items, fallbackLabel = "Objekt") {
+          return getProjectLegendDisplayLabel(items, fallbackLabel);
+        }
+
+        function isProjectLayerRenameActive(rowKey = "") {
+          return !!rowKey && rowKey === projectLayerRenameRowKey;
+        }
+
+        function isProjectLayerLabelActive(rowKey = "") {
+          return !!rowKey && rowKey === projectLayerLabelRowKey;
+        }
+
+        function isProjectLayerInlineEditActive(rowKey = "") {
+          return isProjectLayerRenameActive(rowKey) || isProjectLayerLabelActive(rowKey);
+        }
+
+        function applyProjectObjectRename(items, nextName = "", label = "Objekt") {
           const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
           if (!targets.length) return false;
-          const nextAlias = String(legendAlias || "").trim();
+          const resolvedName = String(nextName || "").trim();
+          if (!resolvedName) {
+            setProjectExportStatus("Der Name darf nicht leer sein.", true);
+            return false;
+          }
+          let changed = false;
           targets.forEach(item => {
-            if (!nextAlias) {
-              delete item.legendAlias;
-              return;
+            if (getProjectObjectLegendAlias(item) !== resolvedName) {
+              item.legendAlias = resolvedName;
+              changed = true;
             }
-            item.legendAlias = nextAlias;
           });
+          if (!changed) return false;
           updateProjectAreaSource();
-          setProjectExportStatus(
-            nextAlias
-              ? `Legendenname "${nextAlias}" für "${label}" gesetzt.`
-              : `Legendenname für "${label}" zurückgesetzt.`
-          );
+          setProjectExportStatus(`Name für "${label}" auf "${resolvedName}" geändert.`);
           return true;
         }
 
-        function promptProjectObjectLabelField(items, label = "Objekt") {
+        function openProjectLayerRename(rowKey, items, label = "Objekt") {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!rowKey || !targets.length) return false;
+          cancelProjectLayerLabel({ rerender: false });
+          projectLayerRenameRowKey = rowKey;
+          projectLayerRenameDraft = getProjectRenameValue(targets, label);
+          projectLayerRenameFocusPending = true;
+          renderProjectLayerList();
+          return true;
+        }
+
+        function cancelProjectLayerRename({ rerender = true } = {}) {
+          const hadState =
+            !!projectLayerRenameRowKey ||
+            !!projectLayerRenameDraft ||
+            !!projectLayerRenameFocusPending;
+          projectLayerRenameRowKey = "";
+          projectLayerRenameDraft = "";
+          projectLayerRenameFocusPending = false;
+          if (hadState && rerender) {
+            renderProjectLayerList();
+          }
+          return hadState;
+        }
+
+        function openProjectLayerLabel(rowKey, items, label = "Objekt") {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!rowKey || !targets.length || !canProjectObjectsUseLabels(targets)) return false;
+          cancelProjectLayerRename({ rerender: false });
+          projectLayerLabelRowKey = rowKey;
+          projectLayerLabelFocusPending = true;
+          renderProjectLayerList();
+          return true;
+        }
+
+        function cancelProjectLayerLabel({ rerender = true } = {}) {
+          const hadState = !!projectLayerLabelRowKey || !!projectLayerLabelFocusPending;
+          projectLayerLabelRowKey = "";
+          projectLayerLabelFocusPending = false;
+          if (hadState && rerender) {
+            renderProjectLayerList();
+          }
+          return hadState;
+        }
+
+        function commitProjectLayerLabel(items, nextField = "", label = "Objekt") {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!targets.length) {
+            cancelProjectLayerLabel();
+            return false;
+          }
+          cancelProjectLayerLabel({ rerender: false });
+          const changed = applyProjectObjectLabelField(targets, nextField, label);
+          if (!changed) {
+            renderProjectLayerList();
+          }
+          return changed;
+        }
+
+        function commitProjectLayerRename(items, label = "Objekt") {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!targets.length) {
+            cancelProjectLayerRename();
+            return false;
+          }
+          const nextName = String(projectLayerRenameDraft || "").trim();
+          if (!nextName) {
+            setProjectExportStatus("Der Name darf nicht leer sein.", true);
+            projectLayerRenameFocusPending = true;
+            renderProjectLayerList();
+            return false;
+          }
+          cancelProjectLayerRename({ rerender: false });
+          const changed = applyProjectObjectRename(targets, nextName, label);
+          if (!changed) {
+            renderProjectLayerList();
+          }
+          return changed;
+        }
+
+        function buildProjectLayerNameNode(rowKey, items, label = "Objekt") {
+          if (!isProjectLayerRenameActive(rowKey)) {
+            const name = document.createElement("span");
+            name.className = "project-layer-name";
+            name.textContent = label;
+            return name;
+          }
+          const input = document.createElement("input");
+          input.type = "text";
+          input.className = "project-layer-name-input";
+          input.value = projectLayerRenameDraft;
+          input.autocomplete = "off";
+          input.spellcheck = false;
+          input.draggable = false;
+          input.setAttribute("aria-label", `Name für ${label}`);
+          input.addEventListener("input", () => {
+            projectLayerRenameDraft = input.value;
+          });
+          input.addEventListener("keydown", event => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              event.stopPropagation();
+              commitProjectLayerRename(items, label);
+              return;
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              event.stopPropagation();
+              cancelProjectLayerRename();
+            }
+          });
+          input.addEventListener("click", event => {
+            event.stopPropagation();
+          });
+          input.addEventListener("mousedown", event => {
+            event.stopPropagation();
+          });
+          input.addEventListener("blur", () => {
+            if (isProjectLayerRenameActive(rowKey)) {
+              commitProjectLayerRename(items, label);
+            }
+          });
+          return input;
+        }
+
+        function buildProjectLayerLabelNode(rowKey, items, fallbackNode, label = "Objekt") {
+          if (!isProjectLayerLabelActive(rowKey)) {
+            return fallbackNode;
+          }
           const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
           const columns = getProjectAvailableLabelColumns(targets);
-          if (!columns.length) {
-            setProjectExportStatus(`Für "${label}" sind keine importierten Attribute verfügbar.`, true);
-            return false;
-          }
-          const currentField = getProjectCommonLabelField(targets);
-          const lines = [
-            `Beschriftung für "${label}" wählen:`,
-            "0 = Ohne Beschriftung"
-          ];
-          columns.forEach((column, index) => {
-            lines.push(`${index + 1} = ${column}`);
+          const select = document.createElement("select");
+          select.className = "project-layer-label-select";
+          select.setAttribute("aria-label", `Beschriftung für ${label}`);
+
+          const emptyOption = document.createElement("option");
+          emptyOption.value = "";
+          emptyOption.textContent = "Ohne Beschriftung";
+          select.appendChild(emptyOption);
+
+          columns.forEach(column => {
+            const option = document.createElement("option");
+            option.value = column;
+            option.textContent = column;
+            select.appendChild(option);
           });
-          const raw = window.prompt(
-            lines.join("\n"),
-            currentField && columns.includes(currentField)
-              ? String(columns.indexOf(currentField) + 1)
-              : "0"
-          );
-          if (raw == null) return false;
-          const value = String(raw).trim();
-          if (!value || value === "0" || /^aus$/i.test(value) || /^ohne$/i.test(value)) {
-            return applyProjectObjectLabelField(targets, "", label);
-          }
-          const selectedIndex = Number.parseInt(value, 10);
-          let nextField = "";
-          if (
-            Number.isFinite(selectedIndex) &&
-            selectedIndex >= 1 &&
-            selectedIndex <= columns.length
-          ) {
-            nextField = columns[selectedIndex - 1];
-          } else {
-            nextField =
-              columns.find(column => column.toLowerCase() === value.toLowerCase()) || "";
-          }
-          if (!nextField) {
-            setProjectExportStatus("Ungültige Attributspalte für die Beschriftung.", true);
-            return false;
-          }
-          return applyProjectObjectLabelField(targets, nextField, label);
+
+          const currentField = getProjectCommonLabelField(targets);
+          select.value = currentField && columns.includes(currentField) ? currentField : "";
+
+          select.addEventListener("change", () => {
+            commitProjectLayerLabel(targets, select.value, label);
+          });
+          select.addEventListener("keydown", event => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              event.stopPropagation();
+              cancelProjectLayerLabel();
+            }
+          });
+          select.addEventListener("click", event => {
+            event.stopPropagation();
+          });
+          select.addEventListener("mousedown", event => {
+            event.stopPropagation();
+          });
+          select.addEventListener("blur", () => {
+            if (isProjectLayerLabelActive(rowKey)) {
+              cancelProjectLayerLabel();
+            }
+          });
+          return select;
         }
 
-        function promptProjectObjectLegendAlias(items, label = "Objekt") {
-          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
-          if (!targets.length) return false;
-          const currentAlias = getProjectCommonLegendAlias(targets);
-          const raw = window.prompt(
-            `Legendenname für "${label}" eingeben:\nLeer lassen = Standardname aus der Objektliste`,
-            currentAlias
-          );
-          if (raw == null) return false;
-          return applyProjectObjectLegendAlias(targets, raw, label);
-        }
-
-        function buildProjectLabelAction(items, label = "Objekt") {
+        function buildProjectLabelAction(rowKey, items, label = "Objekt") {
           const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
           if (!targets.length || !canProjectObjectsUseLabels(targets)) return null;
           const currentField = getProjectCommonLabelField(targets);
@@ -4045,34 +4207,28 @@
           );
           labelBtn.textContent = "T";
           labelBtn.addEventListener("click", () => {
-            promptProjectObjectLabelField(targets, label);
+            openProjectLayerLabel(rowKey, targets, label);
           });
           return labelBtn;
         }
 
-        function buildProjectLegendAliasAction(items, label = "Objekt") {
+        function buildProjectRenameAction(rowKey, items, label = "Objekt") {
           const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
           if (!targets.length) return null;
-          const currentAlias = getProjectCommonLegendAlias(targets);
-          const legendBtn = document.createElement("button");
-          legendBtn.type = "button";
-          legendBtn.className = "project-layer-action project-layer-action--legend";
-          if (currentAlias) {
-            legendBtn.classList.add("is-active");
-          }
-          legendBtn.dataset.action = "legend";
-          legendBtn.title = currentAlias ? `Legendenname: ${currentAlias}` : "Legendenname für PDF setzen";
-          legendBtn.setAttribute(
+          const renameBtn = document.createElement("button");
+          renameBtn.type = "button";
+          renameBtn.className = "project-layer-action project-layer-action--legend";
+          renameBtn.dataset.action = "rename";
+          renameBtn.title = `Name von ${label} ändern`;
+          renameBtn.setAttribute(
             "aria-label",
-            currentAlias
-              ? `Legendenname ${currentAlias} für ${label} ändern`
-              : `Legendenname für ${label} setzen`
+            `Name von ${label} ändern`
           );
-          legendBtn.textContent = "L";
-          legendBtn.addEventListener("click", () => {
-            promptProjectObjectLegendAlias(targets, label);
+          renameBtn.textContent = "N";
+          renameBtn.addEventListener("click", () => {
+            openProjectLayerRename(rowKey, targets, label);
           });
-          return legendBtn;
+          return renameBtn;
         }
         const exportScaleOptions = new Set([250, 500, 1000, 1500, 2000]);
         const exportScaleCustomValue = "custom";
@@ -4237,6 +4393,11 @@
         let projectLayerDragRowKey = "";
         let projectLayerDropRowKey = "";
         let projectLayerDropPlacement = "";
+        let projectLayerRenameRowKey = "";
+        let projectLayerRenameDraft = "";
+        let projectLayerRenameFocusPending = false;
+        let projectLayerLabelRowKey = "";
+        let projectLayerLabelFocusPending = false;
         let projectClusterLassoActive = false;
         let projectClusterLassoDragging = false;
         let projectClusterLassoPanning = false;
@@ -7521,6 +7682,7 @@
             kind: "group",
             rowKey,
             label,
+            defaultLabel: label,
             typeLabel,
             items,
             uploadGroupFormat,
@@ -7565,11 +7727,28 @@
 
         function updateProjectLayerGroupRowSummary(rowEntry) {
           if (!rowEntry || rowEntry.kind !== "group") return;
+          const items = Array.isArray(rowEntry.items) ? rowEntry.items.filter(Boolean) : [];
+          const fallbackLabel = String(rowEntry.defaultLabel || rowEntry.label || "Gruppe").trim() || "Gruppe";
+          let nextLabel = fallbackLabel;
+          if (items.length) {
+            const uploadGroupName = getProjectCommonUploadGroupName(items);
+            if (items.every(item => isProjectPointObject(item))) {
+              const clusterLabel =
+                getProjectCommonPointClusterLabel(items) ||
+                getProjectPointClusterName(getProjectPointClusterId(items[0]));
+              nextLabel = uploadGroupName
+                ? `${uploadGroupName} · ${clusterLabel}`
+                : clusterLabel || fallbackLabel;
+            } else if (uploadGroupName) {
+              nextLabel = uploadGroupName;
+            }
+          }
+          rowEntry.label = getProjectLegendDisplayLabel(items, nextLabel);
           const parts = [];
           const uploadGroupFormat = String(rowEntry.uploadGroupFormat || "").trim();
           if (uploadGroupFormat) parts.push(uploadGroupFormat);
-          parts.push(getProjectLayerGroupedItemLabel(rowEntry.items));
-          const commonBuffer = getProjectLayerCommonBufferMeters(rowEntry.items);
+          parts.push(getProjectLayerGroupedItemLabel(items));
+          const commonBuffer = getProjectLayerCommonBufferMeters(items);
           if (commonBuffer > 0) parts.push(`Puffer ${commonBuffer} m`);
           rowEntry.summaryText = parts.join(" · ");
         }
@@ -7583,24 +7762,26 @@
           const uploadGroupFormat = String(item?.uploadGroupFormat || "").trim();
           if (isProjectPointObject(item)) {
             const clusterId = getProjectPointClusterId(item);
+            const clusterName =
+              String(item?.pointClusterName || "").trim() || getProjectPointClusterName(clusterId);
             if (uploadGroupId) {
               return buildProjectLayerGroupRow({
                 rowKey,
-                label: `${uploadGroupName} · ${getProjectPointClusterName(clusterId)}`,
+                label: `${uploadGroupName} · ${clusterName}`,
                 typeLabel: "UPL",
                 items: [],
                 uploadGroupFormat,
                 deleteTitle: "Cluster löschen",
-                deleteStatus: `${getProjectPointClusterName(clusterId)} aus "${uploadGroupName}" gelöscht.`
+                deleteStatus: `${clusterName} aus "${uploadGroupName}" gelöscht.`
               });
             }
             return buildProjectLayerGroupRow({
               rowKey,
-              label: getProjectPointClusterName(clusterId),
+              label: clusterName,
               typeLabel: "PCL",
               items: [],
               deleteTitle: "Cluster löschen",
-              deleteStatus: `${getProjectPointClusterName(clusterId)} gelöscht.`
+              deleteStatus: `${clusterName} gelöscht.`
             });
           }
           if (uploadGroupId) {
@@ -7805,6 +7986,48 @@
           return projectObjectColorToRgb(colorValue);
         }
 
+        function getProjectLayerSymbolMode(items, fallbackMode = "polygon") {
+          const targets = (Array.isArray(items) ? items : [items]).filter(item => !!item?.geometry);
+          if (!targets.length) {
+            return projectDrawModes.includes(fallbackMode) ? fallbackMode : "mixed";
+          }
+          const mode = getProjectLegendEntryMode(targets);
+          return mode === "mixed" ? "mixed" : mode;
+        }
+
+        function getProjectLayerSymbolColor(items) {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          return (
+            targets.map(item => getProjectObjectDisplayColor(item)).find(Boolean) || projectAccentColor
+          );
+        }
+
+        function getProjectLayerSymbolFillColor(colorValue) {
+          const [red, green, blue] = projectObjectColorToRgb(colorValue);
+          return `rgba(${red}, ${green}, ${blue}, 0.18)`;
+        }
+
+        function createProjectLayerSymbol(items, label = "Objekt", fallbackMode = "polygon") {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          const symbol = document.createElement("button");
+          const symbolColor = getProjectLayerSymbolColor(targets);
+          symbol.type = "button";
+          symbol.className = "project-layer-symbol";
+          symbol.dataset.mode = getProjectLayerSymbolMode(targets, fallbackMode);
+          symbol.style.setProperty("--project-layer-symbol-color", symbolColor);
+          symbol.style.setProperty(
+            "--project-layer-symbol-fill",
+            getProjectLayerSymbolFillColor(symbolColor)
+          );
+          symbol.title = `Farbe für ${label} ändern`;
+          symbol.setAttribute("aria-label", `Farbe für ${label} ändern`);
+          symbol.addEventListener("click", event => {
+            event.stopPropagation();
+            openProjectObjectsColorPicker(targets, label);
+          });
+          return symbol;
+        }
+
         function buildProjectLegendEntry(items, fallbackLabel = "Objekt") {
           const targets = (Array.isArray(items) ? items : [items]).filter(item => !!item?.geometry);
           if (!targets.length) return null;
@@ -7866,6 +8089,8 @@
             projectLayerClearAll.disabled = projectObjects.length === 0;
           }
           if (!projectObjects.length) {
+            cancelProjectLayerRename({ rerender: false });
+            cancelProjectLayerLabel({ rerender: false });
             const empty = document.createElement("div");
             empty.className = "project-layer-empty";
             empty.textContent = "Noch keine Objekte gezeichnet.";
@@ -7873,6 +8098,18 @@
             return;
           }
           const rows = getProjectLayerDisplayRows();
+          if (
+            projectLayerRenameRowKey &&
+            !rows.some(rowEntry => getProjectLayerRowKey(rowEntry) === projectLayerRenameRowKey)
+          ) {
+            cancelProjectLayerRename({ rerender: false });
+          }
+          if (
+            projectLayerLabelRowKey &&
+            !rows.some(rowEntry => getProjectLayerRowKey(rowEntry) === projectLayerLabelRowKey)
+          ) {
+            cancelProjectLayerLabel({ rerender: false });
+          }
           const frag = document.createDocumentFragment();
           rows.forEach(rowEntry => {
               if (rowEntry?.kind === "group") {
@@ -7882,21 +8119,25 @@
                 const rowLabel = rowEntry.label || "Gruppe";
                 const row = document.createElement("div");
                 row.className = "project-layer-item";
+                const isEditing = isProjectLayerInlineEditActive(rowKey);
                 const anySelected = items.some(item => item.id === projectSelectedObjectId);
                 const allHidden = items.every(item => item.visible === false);
                 if (anySelected) row.classList.add("is-selected");
                 if (allHidden) row.classList.add("is-hidden");
+                if (isEditing) row.classList.add("is-editing");
                 attachProjectLayerRowDropEvents(row, rowKey);
                 row.appendChild(createProjectLayerDragHandle(row, rowKey, rowLabel));
 
-                const main = document.createElement("button");
-                main.type = "button";
+                const main = document.createElement(isEditing ? "div" : "button");
+                if (!isEditing) {
+                  main.type = "button";
+                }
                 main.className = "project-layer-main";
                 main.draggable = false;
 
-                const name = document.createElement("span");
-                name.className = "project-layer-name";
-                name.textContent = rowLabel;
+                const symbol = createProjectLayerSymbol(items, rowLabel, items[0]?.mode || "mixed");
+
+                const name = buildProjectLayerNameNode(rowKey, items, rowLabel);
 
                 const meta = document.createElement("span");
                 meta.className = "project-layer-meta";
@@ -7908,30 +8149,41 @@
                 summary.className = "project-layer-buffer";
                 summary.textContent = rowEntry.summaryText || getProjectLayerGroupedItemLabel(items);
                 meta.appendChild(summary);
+                const secondary = buildProjectLayerLabelNode(rowKey, items, meta, rowLabel);
 
-                main.appendChild(name);
-                main.appendChild(meta);
-                main.addEventListener("click", () => {
-                  const targetItem = items.find(item => item.visible !== false) || items[0];
-                  if (targetItem) {
-                    projectSelectedObjectId = targetItem.id;
-                  }
-                  updateProjectAreaSource();
-                  const bounds = getCombinedGeometryBounds(items.map(item => item.geometry));
-                  if (bounds) {
-                    map.fitBounds(bounds, { padding: 70, duration: 350, maxZoom: 18.5 });
-                  }
-                });
+                const copy = document.createElement("span");
+                copy.className = "project-layer-copy";
+                copy.appendChild(name);
+                copy.appendChild(secondary);
+
+                main.appendChild(copy);
+
+                row.appendChild(symbol);
+                if (!isEditing) {
+                  main.addEventListener("click", () => {
+                    const targetItem = items.find(item => item.visible !== false) || items[0];
+                    if (targetItem) {
+                      projectSelectedObjectId = targetItem.id;
+                    }
+                    updateProjectAreaSource();
+                    const bounds = getCombinedGeometryBounds(items.map(item => item.geometry));
+                    if (bounds) {
+                      map.fitBounds(bounds, { padding: 70, duration: 350, maxZoom: 18.5 });
+                    }
+                  });
+                }
 
                 const actions = document.createElement("div");
                 actions.className = "project-layer-actions";
 
-                const colorBtn = buildProjectColorAction(items, rowLabel);
-                if (colorBtn) actions.appendChild(colorBtn);
-                const labelBtn = buildProjectLabelAction(items, rowLabel);
-                if (labelBtn) actions.appendChild(labelBtn);
-                const legendBtn = buildProjectLegendAliasAction(items, rowLabel);
-                if (legendBtn) actions.appendChild(legendBtn);
+                if (!isEditing) {
+                  const labelBtn = buildProjectLabelAction(rowKey, items, rowLabel);
+                  if (labelBtn) actions.appendChild(labelBtn);
+                }
+                if (!isEditing) {
+                  const renameBtn = buildProjectRenameAction(rowKey, items, rowLabel);
+                  if (renameBtn) actions.appendChild(renameBtn);
+                }
 
                 const visBtn = document.createElement("button");
                 visBtn.type = "button";
@@ -7994,22 +8246,29 @@
               const item = rowEntry?.item;
               if (!item) return;
               const rowKey = getProjectLayerRowKey(rowEntry);
-              const rowLabel = item.name || getProjectObjectTypeLabel(item.mode);
+              const rowLabel = getProjectLegendDisplayLabel(
+                item,
+                item.name || getProjectObjectTypeLabel(item.mode)
+              );
               const row = document.createElement("div");
               row.className = "project-layer-item";
+              const isEditing = isProjectLayerInlineEditActive(rowKey);
               if (item.id === projectSelectedObjectId) row.classList.add("is-selected");
               if (item.visible === false) row.classList.add("is-hidden");
+              if (isEditing) row.classList.add("is-editing");
               attachProjectLayerRowDropEvents(row, rowKey);
               row.appendChild(createProjectLayerDragHandle(row, rowKey, rowLabel));
 
-              const main = document.createElement("button");
-              main.type = "button";
+              const main = document.createElement(isEditing ? "div" : "button");
+              if (!isEditing) {
+                main.type = "button";
+              }
               main.className = "project-layer-main";
               main.draggable = false;
 
-              const name = document.createElement("span");
-              name.className = "project-layer-name";
-              name.textContent = rowLabel;
+              const symbol = createProjectLayerSymbol(item, rowLabel, item.mode || "polygon");
+
+              const name = buildProjectLayerNameNode(rowKey, item, rowLabel);
 
               const meta = document.createElement("span");
               meta.className = "project-layer-meta";
@@ -8030,27 +8289,38 @@
                 cluster.textContent = getProjectPointClusterName(clusterId);
                 meta.appendChild(cluster);
               }
+              const secondary = buildProjectLayerLabelNode(rowKey, item, meta, rowLabel);
 
-              main.appendChild(name);
-              main.appendChild(meta);
-              main.addEventListener("click", () => {
-                projectSelectedObjectId = item.id;
-                updateProjectAreaSource();
-                const bounds = getGeometryBounds(item.geometry);
-                if (bounds) {
-                  map.fitBounds(bounds, { padding: 70, duration: 350, maxZoom: 18.5 });
-                }
-              });
+              const copy = document.createElement("span");
+              copy.className = "project-layer-copy";
+              copy.appendChild(name);
+              copy.appendChild(secondary);
+
+              main.appendChild(copy);
+
+              row.appendChild(symbol);
+              if (!isEditing) {
+                main.addEventListener("click", () => {
+                  projectSelectedObjectId = item.id;
+                  updateProjectAreaSource();
+                  const bounds = getGeometryBounds(item.geometry);
+                  if (bounds) {
+                    map.fitBounds(bounds, { padding: 70, duration: 350, maxZoom: 18.5 });
+                  }
+                });
+              }
 
               const actions = document.createElement("div");
               actions.className = "project-layer-actions";
 
-              const colorBtn = buildProjectColorAction(item, rowLabel);
-              if (colorBtn) actions.appendChild(colorBtn);
-              const labelBtn = buildProjectLabelAction(item, rowLabel);
-              if (labelBtn) actions.appendChild(labelBtn);
-              const legendBtn = buildProjectLegendAliasAction(item, rowLabel);
-              if (legendBtn) actions.appendChild(legendBtn);
+              if (!isEditing) {
+                const labelBtn = buildProjectLabelAction(rowKey, item, rowLabel);
+                if (labelBtn) actions.appendChild(labelBtn);
+              }
+              if (!isEditing) {
+                const renameBtn = buildProjectRenameAction(rowKey, item, rowLabel);
+                if (renameBtn) actions.appendChild(renameBtn);
+              }
 
               const visBtn = document.createElement("button");
               visBtn.type = "button";
@@ -8102,6 +8372,26 @@
               frag.appendChild(row);
             });
           projectLayerList.appendChild(frag);
+          if (projectLayerRenameFocusPending) {
+            projectLayerRenameFocusPending = false;
+            const renameInput = projectLayerList.querySelector(".project-layer-name-input");
+            if (renameInput && typeof renameInput.focus === "function") {
+              window.requestAnimationFrame(() => {
+                renameInput.focus();
+                if (typeof renameInput.select === "function") {
+                  renameInput.select();
+                }
+              });
+            }
+          } else if (projectLayerLabelFocusPending) {
+            projectLayerLabelFocusPending = false;
+            const labelSelect = projectLayerList.querySelector(".project-layer-label-select");
+            if (labelSelect && typeof labelSelect.focus === "function") {
+              window.requestAnimationFrame(() => {
+                labelSelect.focus();
+              });
+            }
+          }
         }
 
         function hasProjectArea() {
