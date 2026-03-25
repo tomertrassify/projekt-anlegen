@@ -734,6 +734,15 @@
         <strong id="project-layer-title">Objekte (0)</strong>
         <div class="project-layer-header-actions">
           <button
+            id="project-layer-fuse-selected"
+            type="button"
+            aria-label="Ausgewählte Polygone verschmelzen"
+            title="Ausgewählte Polygone verschmelzen"
+            disabled
+          >
+            <span class="project-layer-header-icon project-layer-header-icon--fuse" aria-hidden="true"></span>
+          </button>
+          <button
             id="project-layer-kml-download"
             type="button"
             aria-label="KML herunterladen"
@@ -3358,6 +3367,7 @@
         const projectExportOpen = document.getElementById("project-export-open");
         const projectLayerPanel = document.getElementById("project-layer-panel");
         const projectLayerTitle = document.getElementById("project-layer-title");
+        const projectLayerFuseSelected = document.getElementById("project-layer-fuse-selected");
         const projectLayerKmlDownload = document.getElementById("project-layer-kml-download");
         const projectLayerClearAll = document.getElementById("project-layer-clear-all");
         const projectLayerList = document.getElementById("project-layer-list");
@@ -3540,6 +3550,10 @@
         const projectClusterLassoFillLayerId = "project-cluster-lasso-fill";
         const projectClusterLassoLineLayerId = "project-cluster-lasso-line";
         const projectClusterLassoPointLayerId = "project-cluster-lasso-point";
+        const projectEditEdgeLayerId = "project-edit-edge";
+        const projectEditEdgePointLayerId = "project-edit-edge-point";
+        const projectEditRotateLayerId = "project-edit-rotate";
+        const projectEditVertexLayerId = "project-edit-vertex";
         const projectDraftVertexLayerId = "project-draft-vertices";
         const projectDraftPreviewLayerId = "project-draft-preview";
         const projectExportFrameSourceId = "project-export-frame-source";
@@ -3551,22 +3565,25 @@
         const projectExportRasterFrameLineLayerId = "project-export-raster-frame-line";
         const projectExportRasterSnapGuideLayerId = "project-export-raster-snap-guide";
         const projectExportRasterFrameLabelLayerId = "project-export-raster-frame-label";
-        const projectDrawModes = ["polygon", "line", "point"];
+        const projectDrawModes = ["polygon", "line", "point", "square"];
         const projectDrawModeLabels = {
           polygon: "POLY",
           line: "LINE",
-          point: "PUNKT"
+          point: "PUNKT",
+          square: "RECT"
         };
         const projectDrawModeTips = {
           polygon: "Zeichenmodus: Polygon",
           line: "Zeichenmodus: Linie",
-          point: "Zeichenmodus: Punkt"
+          point: "Zeichenmodus: Punkt",
+          square: "Zeichenmodus: Rechteck"
         };
         const projectDrawModeIcons = {
           off: "assets/icons/PhPenNib.svg",
           polygon: "assets/icons/TablerPolygon.svg",
           line: "assets/icons/IcOutlinePolyline.svg",
-          point: "assets/icons/PhCircleDuotone.svg"
+          point: "assets/icons/PhCircleDuotone.svg",
+          square: "assets/icons/TablerRectangle.svg"
         };
         const projectAccentColor = "#e83e8c";
         const projectAccentRgb = [232, 62, 140];
@@ -4230,6 +4247,22 @@
           });
           return renameBtn;
         }
+
+        function buildProjectRectangleAction(items, label = "Rechteck") {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (targets.length !== 1 || !isProjectRectangleObject(targets[0])) return null;
+          const editBtn = document.createElement("button");
+          editBtn.type = "button";
+          editBtn.className = "project-layer-action";
+          editBtn.dataset.action = "rectangle";
+          editBtn.title = `Breite, Höhe und Rotation für ${label} anpassen`;
+          editBtn.setAttribute("aria-label", `Breite, Höhe und Rotation für ${label} anpassen`);
+          editBtn.innerHTML = '<img src="assets/icons/PhSlidersHorizontal.svg" alt="" />';
+          editBtn.addEventListener("click", () => {
+            promptAndEditProjectRectangle(targets[0]);
+          });
+          return editBtn;
+        }
         const exportScaleOptions = new Set([250, 500, 1000, 1500, 2000]);
         const exportScaleCustomValue = "custom";
         const defaultExportScale = 1000;
@@ -4389,6 +4422,7 @@
         let projectImportDragDepth = 0;
         let projectSpreadsheetImportPending = null;
         let projectSelectedObjectId = "";
+        const projectSelectedObjectIds = new Set();
         let projectObjectSeq = 1;
         let projectLayerDragRowKey = "";
         let projectLayerDropRowKey = "";
@@ -4414,6 +4448,9 @@
         let projectDraftCoords = [];
         let projectDraftRedoCoords = [];
         let projectDraftHoverCoord = null;
+        let projectEditHoveredHandle = null;
+        let projectEditDragState = null;
+        let projectEditSuppressNextClick = false;
         let projectExportStep = "preview";
         let projectExportPlanMode = projectExportPlanModeSingle;
         let projectExportRasterFrames = [];
@@ -6398,6 +6435,10 @@
             projectObjectPointLayerId,
             projectObjectAreaLabelLayerId,
             projectObjectPointLabelLayerId,
+            projectEditEdgeLayerId,
+            projectEditEdgePointLayerId,
+            projectEditRotateLayerId,
+            projectEditVertexLayerId,
             projectDraftPreviewLayerId,
             projectDraftVertexLayerId,
             projectExportRasterFrameFillLayerId,
@@ -6813,11 +6854,14 @@
         function getProjectObjectTypeLabel(mode) {
           if (mode === "line") return "Linie";
           if (mode === "point") return "Punkt";
+          if (mode === "square") return "Rechteck";
           return "Polygon";
         }
 
         function getProjectDrawMinPoints(mode = projectDrawMode) {
-          return mode === "line" ? 2 : mode === "point" ? 1 : 3;
+          if (mode === "line" || mode === "square") return 2;
+          if (mode === "point") return 1;
+          return 3;
         }
 
         function canFinalizeProjectDraft(mode = projectDrawMode) {
@@ -6831,6 +6875,9 @@
           }
           if (mode === "point") {
             return "Punktmodus aktiv. Klick setzt jeweils einen Punkt.";
+          }
+          if (mode === "square") {
+            return "Rechteckmodus aktiv. Erster Klick setzt Ecke 1, zweiter Klick Ecke 2.";
           }
           return "Polygonmodus aktiv. Klick für Eckpunkte, Doppelklick/Enter zum Abschließen.";
         }
@@ -6860,14 +6907,762 @@
             if (points.length < 2) return null;
             return { type: "LineString", coordinates: points };
           }
+          if (mode === "square") {
+            const rectangleState = createProjectRectangleStateFromCornerCoords(points);
+            return rectangleState ? buildProjectRectangleGeometry(rectangleState) : null;
+          }
           const ring = toClosedRing(points);
           if (ring.length < 4) return null;
           return { type: "Polygon", coordinates: [ring] };
         }
 
+        function normalizeProjectRotationDegrees(value) {
+          const parsed = Number(value);
+          if (!Number.isFinite(parsed)) return 0;
+          let normalized = parsed % 360;
+          if (normalized > 180) normalized -= 360;
+          if (normalized <= -180) normalized += 360;
+          return Number(normalized.toFixed(2));
+        }
+
+        function projectMetersOffsetToCoord(centerCoord, offsetXMeters, offsetYMeters) {
+          const center = normalizeCoord(centerCoord);
+          if (!center) return null;
+          const offsetX = Number(offsetXMeters);
+          const offsetY = Number(offsetYMeters);
+          if (!Number.isFinite(offsetX) || !Number.isFinite(offsetY)) return null;
+          const earthRadius = 6378137;
+          const latRad = (center[1] * Math.PI) / 180;
+          const cosLat = Math.max(0.01, Math.cos(latRad));
+          const deltaLat = (offsetY / earthRadius) * (180 / Math.PI);
+          const deltaLon = (offsetX / (earthRadius * cosLat)) * (180 / Math.PI);
+          return normalizeCoord([center[0] + deltaLon, center[1] + deltaLat]);
+        }
+
+        function getProjectPlanarOffsetMeters(originCoord, targetCoord) {
+          const origin = normalizeCoord(originCoord);
+          const target = normalizeCoord(targetCoord);
+          if (!origin || !target) return null;
+          const deltaEast =
+            haversineDistance([origin[0], origin[1]], [target[0], origin[1]]) *
+            (target[0] >= origin[0] ? 1 : -1);
+          const deltaNorth =
+            haversineDistance([origin[0], origin[1]], [origin[0], target[1]]) *
+            (target[1] >= origin[1] ? 1 : -1);
+          return { x: deltaEast, y: deltaNorth };
+        }
+
+        function rotateProjectPlanarVector(vector, rotationDeg = 0) {
+          const x = Number(vector?.x);
+          const y = Number(vector?.y);
+          if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+          const rotationRad = (Number(rotationDeg || 0) * Math.PI) / 180;
+          const cos = Math.cos(rotationRad);
+          const sin = Math.sin(rotationRad);
+          return {
+            x: x * cos - y * sin,
+            y: x * sin + y * cos
+          };
+        }
+
+        function inverseRotateProjectPlanarVector(vector, rotationDeg = 0) {
+          const x = Number(vector?.x);
+          const y = Number(vector?.y);
+          if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+          const rotationRad = (Number(rotationDeg || 0) * Math.PI) / 180;
+          const cos = Math.cos(rotationRad);
+          const sin = Math.sin(rotationRad);
+          return {
+            x: x * cos + y * sin,
+            y: -x * sin + y * cos
+          };
+        }
+
+        function normalizeProjectRectangleState(rectangleState) {
+          if (!rectangleState || typeof rectangleState !== "object") return null;
+          const center = normalizeCoord(rectangleState.center);
+          const widthMeters = Number(rectangleState.widthMeters);
+          const heightMeters = Number(rectangleState.heightMeters);
+          if (!center) return null;
+          if (!Number.isFinite(widthMeters) || !Number.isFinite(heightMeters)) return null;
+          if (widthMeters <= 0 || heightMeters <= 0) return null;
+          return {
+            center: [center[0], center[1]],
+            widthMeters: Number(widthMeters.toFixed(2)),
+            heightMeters: Number(heightMeters.toFixed(2)),
+            rotationDeg: normalizeProjectRotationDegrees(rectangleState.rotationDeg)
+          };
+        }
+
+        function buildProjectRectangleGeometry(rectangleState) {
+          const normalizedState = normalizeProjectRectangleState(rectangleState);
+          if (!normalizedState) return null;
+          const halfWidth = normalizedState.widthMeters / 2;
+          const halfHeight = normalizedState.heightMeters / 2;
+          const rotationRad = (normalizedState.rotationDeg * Math.PI) / 180;
+          const cos = Math.cos(rotationRad);
+          const sin = Math.sin(rotationRad);
+          const corners = [
+            [-halfWidth, -halfHeight],
+            [halfWidth, -halfHeight],
+            [halfWidth, halfHeight],
+            [-halfWidth, halfHeight]
+          ]
+            .map(([x, y]) => {
+              const rotatedX = x * cos - y * sin;
+              const rotatedY = x * sin + y * cos;
+              return projectMetersOffsetToCoord(normalizedState.center, rotatedX, rotatedY);
+            })
+            .filter(Boolean);
+          const ring = toClosedRing(corners);
+          if (ring.length < 4) return null;
+          return { type: "Polygon", coordinates: [ring] };
+        }
+
+        function createProjectRectangleStateFromCornerCoords(coords = []) {
+          const points = (coords || []).map(normalizeCoord).filter(Boolean);
+          if (points.length < 2) return null;
+          const first = points[0];
+          const second = points[1];
+          const west = Math.min(first[0], second[0]);
+          const east = Math.max(first[0], second[0]);
+          const south = Math.min(first[1], second[1]);
+          const north = Math.max(first[1], second[1]);
+          const center = [(west + east) / 2, (south + north) / 2];
+          const widthMeters = haversineDistance([west, center[1]], [east, center[1]]);
+          const heightMeters = haversineDistance([center[0], south], [center[0], north]);
+          const safeWidth = Math.max(widthMeters || 0, 1);
+          const safeHeight = Math.max(heightMeters || 0, 1);
+          return normalizeProjectRectangleState({
+            center,
+            widthMeters: safeWidth,
+            heightMeters: safeHeight,
+            rotationDeg: 0
+          });
+        }
+
+        function isProjectRectangleObject(item) {
+          return (
+            !!item?.geometry &&
+            isPolygonGeometryType(item.geometry.type) &&
+            !!normalizeProjectRectangleState(item?.rectangleState)
+          );
+        }
+
+        function getProjectRectangleState(item) {
+          const direct = normalizeProjectRectangleState(item?.rectangleState);
+          if (direct) return direct;
+          if (!item?.geometry || !isPolygonGeometryType(item.geometry.type)) return null;
+          const bounds = getGeometryBounds(item.geometry);
+          if (!bounds) return null;
+          return createProjectRectangleStateFromCornerCoords([
+            [bounds[0][0], bounds[0][1]],
+            [bounds[1][0], bounds[1][1]]
+          ]);
+        }
+
+        function applyProjectRectangleState(item, rectangleState) {
+          if (!item) return false;
+          const normalizedState = normalizeProjectRectangleState(rectangleState);
+          if (!normalizedState) return false;
+          const geometry = buildProjectRectangleGeometry(normalizedState);
+          if (!geometry) return false;
+          item.mode = "square";
+          item.rectangleState = normalizedState;
+          item.geometry = geometry;
+          return true;
+        }
+
+        function promptAndEditProjectRectangle(item) {
+          const rectangleState = getProjectRectangleState(item);
+          if (!item || !rectangleState) return false;
+          const widthRaw = window.prompt(
+            "Breite in Meter eingeben:",
+            String(Number(rectangleState.widthMeters.toFixed(2)))
+          );
+          if (widthRaw == null) return false;
+          const widthMeters = Number.parseFloat(String(widthRaw).replace(",", "."));
+          if (!Number.isFinite(widthMeters) || widthMeters <= 0) {
+            setProjectExportStatus("Breite muss größer als 0 sein.", true);
+            return false;
+          }
+          const heightRaw = window.prompt(
+            "Höhe in Meter eingeben:",
+            String(Number(rectangleState.heightMeters.toFixed(2)))
+          );
+          if (heightRaw == null) return false;
+          const heightMeters = Number.parseFloat(String(heightRaw).replace(",", "."));
+          if (!Number.isFinite(heightMeters) || heightMeters <= 0) {
+            setProjectExportStatus("Höhe muss größer als 0 sein.", true);
+            return false;
+          }
+          const rotationRaw = window.prompt(
+            "Rotation in Grad eingeben (0 = waagerecht):",
+            String(Number(rectangleState.rotationDeg.toFixed(2)))
+          );
+          if (rotationRaw == null) return false;
+          const rotationDeg = Number.parseFloat(String(rotationRaw).replace(",", "."));
+          if (!Number.isFinite(rotationDeg)) {
+            setProjectExportStatus("Rotation muss eine Zahl sein.", true);
+            return false;
+          }
+          if (
+            !applyProjectRectangleState(item, {
+              center: rectangleState.center,
+              widthMeters,
+              heightMeters,
+              rotationDeg
+            })
+          ) {
+            setProjectExportStatus("Rechteck konnte nicht aktualisiert werden.", true);
+            return false;
+          }
+          setProjectObjectSelection([item.id], { primaryId: item.id, update: false });
+          updateProjectAreaSource();
+          setProjectExportStatus(`Rechteck "${item.name}" aktualisiert.`);
+          return true;
+        }
+
         function getProjectObjectById(id) {
           if (!id) return null;
           return projectObjects.find(item => item.id === id) || null;
+        }
+
+        function syncProjectObjectSelectionState(items = projectObjects) {
+          const availableIds = new Set(
+            (items || [])
+              .map(item => String(item?.id || "").trim())
+              .filter(Boolean)
+          );
+          Array.from(projectSelectedObjectIds).forEach(id => {
+            if (!availableIds.has(id)) {
+              projectSelectedObjectIds.delete(id);
+            }
+          });
+          if (projectSelectedObjectId && !availableIds.has(projectSelectedObjectId)) {
+            projectSelectedObjectId = "";
+          }
+          if (projectSelectedObjectId && availableIds.has(projectSelectedObjectId)) {
+            projectSelectedObjectIds.add(projectSelectedObjectId);
+          }
+          if (!projectSelectedObjectIds.size) {
+            projectSelectedObjectId = "";
+            return;
+          }
+          if (projectSelectedObjectId && projectSelectedObjectIds.has(projectSelectedObjectId)) {
+            return;
+          }
+          let nextPrimary = "";
+          (items || []).forEach(item => {
+            const objectId = String(item?.id || "").trim();
+            if (objectId && projectSelectedObjectIds.has(objectId)) {
+              nextPrimary = objectId;
+            }
+          });
+          if (!nextPrimary) {
+            nextPrimary = Array.from(projectSelectedObjectIds).pop() || "";
+          }
+          projectSelectedObjectId = nextPrimary;
+        }
+
+        function setProjectObjectSelection(ids = [], options = {}) {
+          const nextIds = Array.isArray(ids) ? ids : [ids];
+          const availableIds = new Set(projectObjects.map(item => String(item?.id || "").trim()).filter(Boolean));
+          projectSelectedObjectIds.clear();
+          nextIds.forEach(id => {
+            const objectId = String(id || "").trim();
+            if (objectId && availableIds.has(objectId)) {
+              projectSelectedObjectIds.add(objectId);
+            }
+          });
+          const preferredPrimary = String(options.primaryId || "").trim();
+          projectSelectedObjectId =
+            preferredPrimary && projectSelectedObjectIds.has(preferredPrimary)
+              ? preferredPrimary
+              : "";
+          syncProjectObjectSelectionState();
+          if (options.update !== false) {
+            updateProjectAreaSource();
+          }
+        }
+
+        function toggleProjectObjectSelection(ids = [], options = {}) {
+          const nextIds = Array.isArray(ids) ? ids : [ids];
+          const availableIds = new Set(projectObjects.map(item => String(item?.id || "").trim()).filter(Boolean));
+          nextIds.forEach(id => {
+            const objectId = String(id || "").trim();
+            if (!objectId || !availableIds.has(objectId)) return;
+            if (projectSelectedObjectIds.has(objectId)) {
+              projectSelectedObjectIds.delete(objectId);
+            } else {
+              projectSelectedObjectIds.add(objectId);
+            }
+          });
+          const preferredPrimary = String(options.primaryId || "").trim();
+          if (preferredPrimary && projectSelectedObjectIds.has(preferredPrimary)) {
+            projectSelectedObjectId = preferredPrimary;
+          }
+          syncProjectObjectSelectionState();
+          if (options.update !== false) {
+            updateProjectAreaSource();
+          }
+        }
+
+        function isProjectObjectSelected(itemOrId) {
+          const objectId =
+            typeof itemOrId === "string"
+              ? String(itemOrId || "").trim()
+              : String(itemOrId?.id || "").trim();
+          if (!objectId) return false;
+          return projectSelectedObjectIds.has(objectId);
+        }
+
+        function getSelectedProjectObjects(items = projectObjects) {
+          syncProjectObjectSelectionState(items);
+          return (items || []).filter(item => isProjectObjectSelected(item));
+        }
+
+        function getActiveProjectEditObject(items = projectObjects) {
+          const selectedItems = getSelectedProjectObjects(items);
+          if (selectedItems.length !== 1) return null;
+          const item = selectedItems[0];
+          if (!item?.geometry || item.visible === false) return null;
+          return item;
+        }
+
+        function canEditProjectObject(item) {
+          if (!item?.geometry) return false;
+          const type = String(item.geometry.type || "");
+          return (
+            type === "Point" ||
+            type === "MultiPoint" ||
+            type === "LineString" ||
+            type === "MultiLineString" ||
+            type === "Polygon" ||
+            type === "MultiPolygon"
+          );
+        }
+
+        function collectProjectEditableVertices(geometry, out = []) {
+          if (!geometry || !Array.isArray(out)) return out;
+          const type = String(geometry.type || "");
+          if (type === "Point") {
+            const coord = normalizeCoord(geometry.coordinates);
+            if (coord) out.push({ coord, path: ["Point"] });
+            return out;
+          }
+          if (type === "MultiPoint") {
+            (geometry.coordinates || []).forEach((coord, pointIndex) => {
+              const normalized = normalizeCoord(coord);
+              if (!normalized) return;
+              out.push({ coord: normalized, path: ["MultiPoint", pointIndex] });
+            });
+            return out;
+          }
+          if (type === "LineString") {
+            (geometry.coordinates || []).forEach((coord, coordIndex) => {
+              const normalized = normalizeCoord(coord);
+              if (!normalized) return;
+              out.push({ coord: normalized, path: ["LineString", coordIndex] });
+            });
+            return out;
+          }
+          if (type === "MultiLineString") {
+            (geometry.coordinates || []).forEach((line, lineIndex) => {
+              (line || []).forEach((coord, coordIndex) => {
+                const normalized = normalizeCoord(coord);
+                if (!normalized) return;
+                out.push({
+                  coord: normalized,
+                  path: ["MultiLineString", lineIndex, coordIndex]
+                });
+              });
+            });
+            return out;
+          }
+          if (type === "Polygon") {
+            (geometry.coordinates || []).forEach((ring, ringIndex) => {
+              const openRing = Array.isArray(ring) ? ring.slice(0, -1) : [];
+              openRing.forEach((coord, coordIndex) => {
+                const normalized = normalizeCoord(coord);
+                if (!normalized) return;
+                out.push({ coord: normalized, path: ["Polygon", ringIndex, coordIndex] });
+              });
+            });
+            return out;
+          }
+          if (type === "MultiPolygon") {
+            (geometry.coordinates || []).forEach((polygon, polygonIndex) => {
+              (polygon || []).forEach((ring, ringIndex) => {
+                const openRing = Array.isArray(ring) ? ring.slice(0, -1) : [];
+                openRing.forEach((coord, coordIndex) => {
+                  const normalized = normalizeCoord(coord);
+                  if (!normalized) return;
+                  out.push({
+                    coord: normalized,
+                    path: ["MultiPolygon", polygonIndex, ringIndex, coordIndex]
+                  });
+                });
+              });
+            });
+            return out;
+          }
+          return out;
+        }
+
+        function applyProjectGeometryVertexMove(geometry, path = [], nextCoord) {
+          const coord = normalizeCoord(nextCoord);
+          if (!geometry || !coord || !Array.isArray(path) || !path.length) return null;
+          const nextGeometry = cloneJson(geometry);
+          const [type, a, b, c] = path;
+          if (type === "Point") {
+            nextGeometry.coordinates = coord;
+            return nextGeometry;
+          }
+          if (type === "MultiPoint") {
+            if (!Array.isArray(nextGeometry.coordinates?.[a])) return null;
+            nextGeometry.coordinates[a] = coord;
+            return nextGeometry;
+          }
+          if (type === "LineString") {
+            if (!Array.isArray(nextGeometry.coordinates?.[a])) return null;
+            nextGeometry.coordinates[a] = coord;
+            return nextGeometry;
+          }
+          if (type === "MultiLineString") {
+            if (!Array.isArray(nextGeometry.coordinates?.[a]?.[b])) return null;
+            nextGeometry.coordinates[a][b] = coord;
+            return nextGeometry;
+          }
+          if (type === "Polygon") {
+            const ring = nextGeometry.coordinates?.[a];
+            if (!Array.isArray(ring) || !Array.isArray(ring[b])) return null;
+            ring[b] = coord;
+            if (b === 0 && ring.length > 1) {
+              ring[ring.length - 1] = coord;
+            }
+            return nextGeometry;
+          }
+          if (type === "MultiPolygon") {
+            const ring = nextGeometry.coordinates?.[a]?.[b];
+            if (!Array.isArray(ring) || !Array.isArray(ring[c])) return null;
+            ring[c] = coord;
+            if (c === 0 && ring.length > 1) {
+              ring[ring.length - 1] = coord;
+            }
+            return nextGeometry;
+          }
+          return null;
+        }
+
+        function getProjectRectangleCornerVectors(rectangleState) {
+          const state = normalizeProjectRectangleState(rectangleState);
+          if (!state) return [];
+          const halfWidth = state.widthMeters / 2;
+          const halfHeight = state.heightMeters / 2;
+          return [
+            { id: "sw", x: -halfWidth, y: -halfHeight },
+            { id: "se", x: halfWidth, y: -halfHeight },
+            { id: "ne", x: halfWidth, y: halfHeight },
+            { id: "nw", x: -halfWidth, y: halfHeight }
+          ];
+        }
+
+        function buildProjectEditFeatures(item) {
+          if (!canEditProjectObject(item)) return [];
+          const features = [];
+          if (isProjectRectangleObject(item)) {
+            const rectangleState = getProjectRectangleState(item);
+            if (!rectangleState) return features;
+            const corners = getProjectRectangleCornerVectors(rectangleState)
+              .map(corner => {
+                const globalVector = rotateProjectPlanarVector(corner, rectangleState.rotationDeg);
+                const coord = globalVector
+                  ? projectMetersOffsetToCoord(rectangleState.center, globalVector.x, globalVector.y)
+                  : null;
+                if (!coord) return null;
+                return { ...corner, coord };
+              })
+              .filter(Boolean);
+            const edgeDefs = [
+              { id: "south", axis: "height", cursor: "ns-resize", from: 0, to: 1 },
+              { id: "east", axis: "width", cursor: "ew-resize", from: 1, to: 2 },
+              { id: "north", axis: "height", cursor: "ns-resize", from: 2, to: 3 },
+              { id: "west", axis: "width", cursor: "ew-resize", from: 3, to: 0 }
+            ];
+            edgeDefs.forEach(edge => {
+              const from = corners[edge.from];
+              const to = corners[edge.to];
+              if (!from?.coord || !to?.coord) return;
+              const midpoint = [
+                (from.coord[0] + to.coord[0]) / 2,
+                (from.coord[1] + to.coord[1]) / 2
+              ];
+              features.push({
+                type: "Feature",
+                properties: {
+                  kind: "edit-edge",
+                  objectId: item.id,
+                  handleType: "rect-edge",
+                  edgeId: edge.id,
+                  cursor: edge.cursor
+                },
+                geometry: {
+                  type: "LineString",
+                  coordinates: [from.coord, to.coord]
+                }
+              });
+              features.push({
+                type: "Feature",
+                properties: {
+                  kind: "edit-edge-point",
+                  objectId: item.id,
+                  handleType: "rect-edge",
+                  edgeId: edge.id,
+                  cursor: edge.cursor
+                },
+                geometry: {
+                  type: "Point",
+                  coordinates: midpoint
+                }
+              });
+            });
+            corners.forEach(corner => {
+              features.push({
+                type: "Feature",
+                properties: {
+                  kind: "edit-rotate",
+                  objectId: item.id,
+                  handleType: "rect-rotate",
+                  cornerId: corner.id,
+                  cursor: "crosshair"
+                },
+                geometry: {
+                  type: "Point",
+                  coordinates: corner.coord
+                }
+              });
+            });
+            return features;
+          }
+          collectProjectEditableVertices(item.geometry).forEach((vertex, index) => {
+            features.push({
+              type: "Feature",
+              properties: {
+                kind: "edit-vertex",
+                objectId: item.id,
+                handleType: "vertex",
+                path: JSON.stringify(vertex.path || []),
+                vertexIndex: index,
+                cursor: "move"
+              },
+              geometry: {
+                type: "Point",
+                coordinates: vertex.coord
+              }
+            });
+          });
+          return features;
+        }
+
+        function getProjectEditLayerIds() {
+          return [
+            projectEditRotateLayerId,
+            projectEditVertexLayerId,
+            projectEditEdgePointLayerId,
+            projectEditEdgeLayerId
+          ];
+        }
+
+        function parseProjectEditHandleFeature(feature) {
+          if (!feature?.properties) return null;
+          const handleType = String(feature.properties.handleType || "").trim();
+          const objectId = String(feature.properties.objectId || "").trim();
+          if (!handleType || !objectId) return null;
+          const pathRaw = String(feature.properties.path || "").trim();
+          let path = [];
+          if (pathRaw) {
+            try {
+              const parsed = JSON.parse(pathRaw);
+              if (Array.isArray(parsed)) path = parsed;
+            } catch (_err) {
+              path = [];
+            }
+          }
+          return {
+            objectId,
+            handleType,
+            edgeId: String(feature.properties.edgeId || "").trim(),
+            cornerId: String(feature.properties.cornerId || "").trim(),
+            cursor: String(feature.properties.cursor || "").trim(),
+            path
+          };
+        }
+
+        function getProjectEditHandleAtPoint(point) {
+          if (!map || !point) return null;
+          const layers = getProjectEditLayerIds().filter(layerId => map.getLayer(layerId));
+          if (!layers.length) return null;
+          const features = map.queryRenderedFeatures(point, { layers });
+          if (!Array.isArray(features) || !features.length) return null;
+          const priority = {
+            "rect-rotate": 3,
+            vertex: 2,
+            "rect-edge": 1
+          };
+          const handles = features
+            .map(parseProjectEditHandleFeature)
+            .filter(Boolean)
+            .sort(
+              (left, right) =>
+                (priority[right.handleType] || 0) - (priority[left.handleType] || 0)
+            );
+          return handles[0] || null;
+        }
+
+        function clearProjectEditHoverHandle() {
+          projectEditHoveredHandle = null;
+        }
+
+        function isProjectEditDragging() {
+          return !!projectEditDragState;
+        }
+
+        function consumeProjectEditClickSuppression() {
+          if (!projectEditSuppressNextClick) return false;
+          projectEditSuppressNextClick = false;
+          return true;
+        }
+
+        function stopProjectEditDrag() {
+          if (!projectEditDragState) return false;
+          projectEditDragState = null;
+          if (map?.dragPan && typeof map.dragPan.enable === "function") {
+            map.dragPan.enable();
+          }
+          return true;
+        }
+
+        function startProjectEditDrag(handle, lngLat) {
+          const item = getProjectObjectById(handle?.objectId);
+          if (!item || item.visible === false) return false;
+          const startCoord = normalizeCoord([lngLat?.lng, lngLat?.lat]);
+          if (!startCoord) return false;
+          projectEditDragState = {
+            objectId: item.id,
+            handleType: handle.handleType,
+            edgeId: handle.edgeId || "",
+            cornerId: handle.cornerId || "",
+            path: Array.isArray(handle.path) ? handle.path.slice() : [],
+            startCoord,
+            initialGeometry: cloneJson(item.geometry),
+            initialRectangleState: getProjectRectangleState(item)
+          };
+          projectEditSuppressNextClick = true;
+          projectEditHoveredHandle = handle;
+          if (map?.dragPan && typeof map.dragPan.disable === "function") {
+            map.dragPan.disable();
+          }
+          return true;
+        }
+
+        function applyProjectRectangleEdgeDrag(item, edgeId, pointerCoord, initialState) {
+          const state = normalizeProjectRectangleState(initialState);
+          const pointer = normalizeCoord(pointerCoord);
+          if (!item || !state || !pointer || !edgeId) return false;
+          const planar = getProjectPlanarOffsetMeters(state.center, pointer);
+          const local = inverseRotateProjectPlanarVector(planar, state.rotationDeg);
+          if (!local) return false;
+          const minSize = 1;
+          let widthMeters = state.widthMeters;
+          let heightMeters = state.heightMeters;
+          if (edgeId === "east" || edgeId === "west") {
+            widthMeters = Math.max(minSize, Math.abs(local.x) * 2);
+          } else if (edgeId === "north" || edgeId === "south") {
+            heightMeters = Math.max(minSize, Math.abs(local.y) * 2);
+          } else {
+            return false;
+          }
+          return applyProjectRectangleState(item, {
+            center: state.center,
+            widthMeters,
+            heightMeters,
+            rotationDeg: state.rotationDeg
+          });
+        }
+
+        function getProjectRectangleCornerBaseVector(rectangleState, cornerId) {
+          return (
+            getProjectRectangleCornerVectors(rectangleState).find(corner => corner.id === cornerId) ||
+            null
+          );
+        }
+
+        function applyProjectRectangleRotationDrag(item, cornerId, pointerCoord, initialState) {
+          const state = normalizeProjectRectangleState(initialState);
+          const pointer = normalizeCoord(pointerCoord);
+          if (!item || !state || !pointer || !cornerId) return false;
+          const cornerVector = getProjectRectangleCornerBaseVector(state, cornerId);
+          if (!cornerVector) return false;
+          const targetVector = getProjectPlanarOffsetMeters(state.center, pointer);
+          if (!targetVector) return false;
+          const magnitude = Math.hypot(targetVector.x, targetVector.y);
+          if (!Number.isFinite(magnitude) || magnitude < 0.1) return false;
+          const baseAngle = Math.atan2(cornerVector.y, cornerVector.x);
+          const targetAngle = Math.atan2(targetVector.y, targetVector.x);
+          const rotationDeg = normalizeProjectRotationDegrees(
+            ((targetAngle - baseAngle) * 180) / Math.PI
+          );
+          return applyProjectRectangleState(item, {
+            center: state.center,
+            widthMeters: state.widthMeters,
+            heightMeters: state.heightMeters,
+            rotationDeg
+          });
+        }
+
+        function applyProjectEditDragMove(lngLat) {
+          if (!projectEditDragState) return false;
+          const item = getProjectObjectById(projectEditDragState.objectId);
+          if (!item || item.visible === false) {
+            stopProjectEditDrag();
+            return false;
+          }
+          const pointerCoord = normalizeCoord([lngLat?.lng, lngLat?.lat]);
+          if (!pointerCoord) return false;
+          let changed = false;
+          if (projectEditDragState.handleType === "vertex") {
+            const nextGeometry = applyProjectGeometryVertexMove(
+              projectEditDragState.initialGeometry,
+              projectEditDragState.path,
+              pointerCoord
+            );
+            if (nextGeometry) {
+              item.geometry = nextGeometry;
+              if (item.mode === "square") {
+                delete item.rectangleState;
+                item.mode = "polygon";
+              }
+              changed = true;
+            }
+          } else if (projectEditDragState.handleType === "rect-edge") {
+            changed = applyProjectRectangleEdgeDrag(
+              item,
+              projectEditDragState.edgeId,
+              pointerCoord,
+              projectEditDragState.initialRectangleState
+            );
+          } else if (projectEditDragState.handleType === "rect-rotate") {
+            changed = applyProjectRectangleRotationDrag(
+              item,
+              projectEditDragState.cornerId,
+              pointerCoord,
+              projectEditDragState.initialRectangleState
+            );
+          }
+          if (!changed) return false;
+          updateProjectAreaSource();
+          return true;
         }
 
         function canProjectObjectUseBuffer(item) {
@@ -7562,7 +8357,7 @@
                 ...group,
                 geometry,
                 objectId: `merged-buffer:${group.key}`,
-                selected: group.items.some(item => item?.id === projectSelectedObjectId),
+                selected: group.items.some(item => isProjectObjectSelected(item)),
                 commonBufferMeters,
                 name:
                   commonBufferMeters && commonBufferMeters > 0
@@ -7622,9 +8417,10 @@
           item.geometry = cloneJson(bufferedGeometry);
           item.mode = "polygon";
           item.bufferMeters = 0;
+          delete item.rectangleState;
           delete item.pointClusterId;
           delete item.pointClusterName;
-          projectSelectedObjectId = item.id;
+          setProjectObjectSelection([item.id], { primaryId: item.id, update: false });
           projectBufferDistanceM = Math.max(rounded, projectBufferDistanceM || 0);
           updateProjectAreaSource();
           setProjectExportStatus(`Puffer ${rounded} m für "${item.name}" als Fläche übernommen.`);
@@ -8028,6 +8824,101 @@
           return symbol;
         }
 
+        function getProjectLayerPrimarySelectionItem(items = []) {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!targets.length) return null;
+          return targets.find(item => item.visible !== false) || targets[targets.length - 1] || null;
+        }
+
+        function selectProjectLayerItems(items = [], options = {}) {
+          const targets = (Array.isArray(items) ? items : [items]).filter(Boolean);
+          if (!targets.length) return false;
+          const ids = targets.map(item => item.id).filter(Boolean);
+          const primaryItem = getProjectLayerPrimarySelectionItem(targets);
+          const shouldToggle = options.toggle === true;
+          if (shouldToggle) {
+            toggleProjectObjectSelection(ids, {
+              primaryId: primaryItem?.id || ""
+            });
+          } else {
+            setProjectObjectSelection(ids, {
+              primaryId: primaryItem?.id || ""
+            });
+          }
+          if (options.zoom !== false) {
+            const bounds = getCombinedGeometryBounds(targets.map(item => item.geometry));
+            if (bounds) {
+              map.fitBounds(bounds, { padding: 70, duration: 350, maxZoom: 18.5 });
+            }
+          }
+          return true;
+        }
+
+        function getSelectedProjectPolygonObjects(items = projectObjects) {
+          return getSelectedProjectObjects(items).filter(item =>
+            isPolygonGeometryType(item?.geometry?.type)
+          );
+        }
+
+        function canFuseSelectedProjectObjects(items = projectObjects) {
+          const selectedItems = getSelectedProjectObjects(items);
+          if (selectedItems.length < 2) return false;
+          return selectedItems.every(item => isPolygonGeometryType(item?.geometry?.type));
+        }
+
+        function fuseSelectedProjectObjects() {
+          const selectedItems = getSelectedProjectObjects();
+          if (selectedItems.length < 2) {
+            setProjectExportStatus("Mindestens zwei Objekte auswählen.", true);
+            return false;
+          }
+          if (!selectedItems.every(item => isPolygonGeometryType(item?.geometry?.type))) {
+            setProjectExportStatus("Fuse funktioniert nur mit Polygon-Objekten.", true);
+            return false;
+          }
+          const mergedGeometry = mergeProjectPolygonGeometries(
+            selectedItems.map(item => cloneJson(item.geometry))
+          );
+          let fusedGeometry =
+            mergedGeometry && mergedGeometry.type === "Polygon"
+              ? cloneJson(mergedGeometry)
+              : buildConnectedProjectPolygonGeometry(mergedGeometry);
+          if (!fusedGeometry || fusedGeometry.type !== "Polygon") {
+            const fallbackBounds = buildProjectBoundsPolygonGeometry(
+              mergedGeometry || combineProjectPolygonGeometries(selectedItems.map(item => item.geometry))
+            );
+            fusedGeometry = fallbackBounds && fallbackBounds.type === "Polygon" ? fallbackBounds : null;
+          }
+          if (!fusedGeometry) {
+            setProjectExportStatus("Auswahl konnte nicht verschmolzen werden.", true);
+            return false;
+          }
+          const fallbackName =
+            selectedItems.length === 2
+              ? "Verschmolzenes Polygon"
+              : `Verschmolzenes Polygon (${selectedItems.length})`;
+          const fusedItem = addProjectObject({
+            mode: "polygon",
+            geometry: fusedGeometry,
+            name: fallbackName,
+            legendAlias: getProjectCommonLegendAlias(selectedItems) || "",
+            displayColor: getProjectObjectDisplayColor(selectedItems[0]),
+            labelField: getProjectCommonLabelField(selectedItems) || ""
+          });
+          if (!fusedItem) {
+            setProjectExportStatus("Auswahl konnte nicht als neues Polygon angelegt werden.", true);
+            return false;
+          }
+          const removeIds = new Set(selectedItems.map(item => item.id));
+          projectObjects = projectObjects.filter(item => !removeIds.has(item.id) || item.id === fusedItem.id);
+          setProjectObjectSelection([fusedItem.id], { primaryId: fusedItem.id, update: false });
+          updateProjectAreaSource();
+          setProjectExportStatus(
+            `${selectedItems.length} Objekte zu "${fusedItem.name}" verschmolzen.`
+          );
+          return true;
+        }
+
         function buildProjectLegendEntry(items, fallbackLabel = "Objekt") {
           const targets = (Array.isArray(items) ? items : [items]).filter(item => !!item?.geometry);
           if (!targets.length) return null;
@@ -8063,13 +8954,16 @@
         }
 
         function resetProjectSelectionAfterObjectRemoval() {
-          if (projectObjects.some(entry => entry.id === projectSelectedObjectId)) return;
-          projectSelectedObjectId = projectObjects.length
-            ? projectObjects[projectObjects.length - 1].id
-            : "";
-          if (!projectObjects.length) {
-            projectObjectSeq = 1;
+          syncProjectObjectSelectionState();
+          if (projectSelectedObjectIds.size) return;
+          if (projectObjects.length) {
+            const fallbackId = projectObjects[projectObjects.length - 1].id;
+            setProjectObjectSelection([fallbackId], { primaryId: fallbackId, update: false });
+            return;
           }
+          projectSelectedObjectId = "";
+          projectSelectedObjectIds.clear();
+          projectObjectSeq = 1;
         }
 
         function renderProjectLayerList() {
@@ -8120,7 +9014,7 @@
                 const row = document.createElement("div");
                 row.className = "project-layer-item";
                 const isEditing = isProjectLayerInlineEditActive(rowKey);
-                const anySelected = items.some(item => item.id === projectSelectedObjectId);
+                const anySelected = items.some(item => isProjectObjectSelected(item));
                 const allHidden = items.every(item => item.visible === false);
                 if (anySelected) row.classList.add("is-selected");
                 if (allHidden) row.classList.add("is-hidden");
@@ -8160,16 +9054,12 @@
 
                 row.appendChild(symbol);
                 if (!isEditing) {
-                  main.addEventListener("click", () => {
-                    const targetItem = items.find(item => item.visible !== false) || items[0];
-                    if (targetItem) {
-                      projectSelectedObjectId = targetItem.id;
-                    }
-                    updateProjectAreaSource();
-                    const bounds = getCombinedGeometryBounds(items.map(item => item.geometry));
-                    if (bounds) {
-                      map.fitBounds(bounds, { padding: 70, duration: 350, maxZoom: 18.5 });
-                    }
+                  main.addEventListener("click", event => {
+                    const isMultiSelect = !!(event.metaKey || event.ctrlKey || event.shiftKey);
+                    selectProjectLayerItems(items, {
+                      toggle: isMultiSelect,
+                      zoom: !isMultiSelect
+                    });
                   });
                 }
 
@@ -8253,7 +9143,7 @@
               const row = document.createElement("div");
               row.className = "project-layer-item";
               const isEditing = isProjectLayerInlineEditActive(rowKey);
-              if (item.id === projectSelectedObjectId) row.classList.add("is-selected");
+              if (isProjectObjectSelected(item)) row.classList.add("is-selected");
               if (item.visible === false) row.classList.add("is-hidden");
               if (isEditing) row.classList.add("is-editing");
               attachProjectLayerRowDropEvents(row, rowKey);
@@ -8300,13 +9190,12 @@
 
               row.appendChild(symbol);
               if (!isEditing) {
-                main.addEventListener("click", () => {
-                  projectSelectedObjectId = item.id;
-                  updateProjectAreaSource();
-                  const bounds = getGeometryBounds(item.geometry);
-                  if (bounds) {
-                    map.fitBounds(bounds, { padding: 70, duration: 350, maxZoom: 18.5 });
-                  }
+                main.addEventListener("click", event => {
+                  const isMultiSelect = !!(event.metaKey || event.ctrlKey || event.shiftKey);
+                  selectProjectLayerItems(item, {
+                    toggle: isMultiSelect,
+                    zoom: !isMultiSelect
+                  });
                 });
               }
 
@@ -8320,6 +9209,10 @@
               if (!isEditing) {
                 const renameBtn = buildProjectRenameAction(rowKey, item, rowLabel);
                 if (renameBtn) actions.appendChild(renameBtn);
+              }
+              if (!isEditing) {
+                const rectangleBtn = buildProjectRectangleAction(item, rowLabel);
+                if (rectangleBtn) actions.appendChild(rectangleBtn);
               }
 
               const visBtn = document.createElement("button");
@@ -8501,7 +9394,7 @@
           });
           projectObjects.forEach(item => {
             if (!item?.geometry || item.visible === false) return;
-            const selected = item.id === projectSelectedObjectId;
+            const selected = isProjectObjectSelected(item);
             const pointClusterId = getProjectPointClusterId(item);
             const renderOrder = renderOrderById.get(String(item.id || "").trim()) || 0;
             const rowKey = getProjectLayerRowKeyForItem(item);
@@ -8548,6 +9441,12 @@
               });
             }
           });
+          const editItem = getActiveProjectEditObject(projectObjects);
+          if (editItem && canEditProjectObject(editItem) && !projectDrawActive) {
+            buildProjectEditFeatures(editItem).forEach(feature => {
+              features.push(feature);
+            });
+          }
           getProjectMergedBufferEntries(projectObjects, { visibleOnly: true }).forEach(entry => {
             const renderOrder = Math.max(
               0,
@@ -8578,20 +9477,56 @@
             });
           });
           if (projectDrawActive && projectDrawMode !== "point" && projectDraftCoords.length) {
-            const draftCoords = projectDraftCoords
-              .map(normalizeCoord)
-              .filter(Boolean)
-              .map(coord => [coord[0], coord[1]]);
-            if (projectDraftHoverCoord) {
-              const hover = normalizeCoord(projectDraftHoverCoord);
-              if (hover) draftCoords.push(hover);
+            const draftCoords = projectDraftCoords.map(normalizeCoord).filter(Boolean);
+            const hover = normalizeCoord(projectDraftHoverCoord);
+            if (projectDrawMode === "square") {
+              const previewGeometry = buildProjectRectangleGeometry(
+                createProjectRectangleStateFromCornerCoords(
+                  hover && draftCoords.length === 1 ? [draftCoords[0], hover] : draftCoords
+                )
+              );
+              const previewRing = Array.isArray(previewGeometry?.coordinates?.[0])
+                ? previewGeometry.coordinates[0]
+                : [];
+              if (previewRing.length >= 4) {
+                features.push({
+                  type: "Feature",
+                  properties: { kind: "draft-preview", mode: projectDrawMode },
+                  geometry: { type: "LineString", coordinates: previewRing }
+                });
+                previewRing.slice(0, -1).forEach((coord, index) => {
+                  const point = normalizeCoord(coord);
+                  if (!point) return;
+                  features.push({
+                    type: "Feature",
+                    properties: { kind: "draft-vertex", index, mode: projectDrawMode },
+                    geometry: { type: "Point", coordinates: point }
+                  });
+                });
+              }
+              if (!previewRing.length && draftCoords.length) {
+                const point = normalizeCoord(draftCoords[0]);
+                if (point) {
+                  features.push({
+                    type: "Feature",
+                    properties: { kind: "draft-vertex", index: 0, mode: projectDrawMode },
+                    geometry: { type: "Point", coordinates: point }
+                  });
+                }
+              }
+            } else {
+              const previewCoords = draftCoords.map(coord => [coord[0], coord[1]]);
+              if (hover) previewCoords.push(hover);
+              if (previewCoords.length >= 2) {
+                features.push({
+                  type: "Feature",
+                  properties: { kind: "draft-preview", mode: projectDrawMode },
+                  geometry: { type: "LineString", coordinates: previewCoords }
+                });
+              }
             }
-            if (draftCoords.length >= 2) {
-              features.push({
-                type: "Feature",
-                properties: { kind: "draft-preview", mode: projectDrawMode },
-                geometry: { type: "LineString", coordinates: draftCoords }
-              });
+            if (projectDrawMode === "square") {
+              return { type: "FeatureCollection", features };
             }
             projectDraftCoords.forEach((coord, index) => {
               const point = normalizeCoord(coord);
@@ -8841,6 +9776,61 @@
               }
             });
           }
+          if (!map.getLayer(projectEditEdgeLayerId)) {
+            map.addLayer({
+              id: projectEditEdgeLayerId,
+              type: "line",
+              source: projectSourceId,
+              filter: ["==", ["get", "kind"], "edit-edge"],
+              paint: {
+                "line-color": "#8fae8b",
+                "line-width": 7,
+                "line-opacity": 0.22
+              }
+            });
+          }
+          if (!map.getLayer(projectEditEdgePointLayerId)) {
+            map.addLayer({
+              id: projectEditEdgePointLayerId,
+              type: "circle",
+              source: projectSourceId,
+              filter: ["==", ["get", "kind"], "edit-edge-point"],
+              paint: {
+                "circle-radius": 4.5,
+                "circle-color": "#ffffff",
+                "circle-stroke-color": "#6b8f67",
+                "circle-stroke-width": 2
+              }
+            });
+          }
+          if (!map.getLayer(projectEditRotateLayerId)) {
+            map.addLayer({
+              id: projectEditRotateLayerId,
+              type: "circle",
+              source: projectSourceId,
+              filter: ["==", ["get", "kind"], "edit-rotate"],
+              paint: {
+                "circle-radius": 6,
+                "circle-color": "#f8fafc",
+                "circle-stroke-color": "#e83e8c",
+                "circle-stroke-width": 2
+              }
+            });
+          }
+          if (!map.getLayer(projectEditVertexLayerId)) {
+            map.addLayer({
+              id: projectEditVertexLayerId,
+              type: "circle",
+              source: projectSourceId,
+              filter: ["==", ["get", "kind"], "edit-vertex"],
+              paint: {
+                "circle-radius": 5.5,
+                "circle-color": "#ffffff",
+                "circle-stroke-color": projectAccentColor,
+                "circle-stroke-width": 2
+              }
+            });
+          }
           if (!map.getLayer(projectDraftVertexLayerId)) {
             map.addLayer({
               id: projectDraftVertexLayerId,
@@ -8924,6 +9914,7 @@
 
         function updateProjectAreaSource() {
           cleanupProjectPointClusterColorOverrides(projectObjects);
+          syncProjectObjectSelectionState();
           if (!hasVisibleProjectPointObjects() && projectClusterLassoActive) {
             projectClusterLassoActive = false;
             resetProjectClusterLassoPreview();
@@ -8950,13 +9941,16 @@
         function updateProjectDrawModeUi() {
           if (!projectDrawToggle) return;
           const tip = projectDrawModeTips[projectDrawMode] || "Zeichenmodus";
+          const activeModeIndex = projectDrawModes.indexOf(projectDrawMode);
+          const nextMode =
+            projectDrawActive && activeModeIndex >= 0 && activeModeIndex < projectDrawModes.length - 1
+              ? projectDrawModes[activeModeIndex + 1]
+              : "";
           const nextStepLabel = !projectDrawActive
             ? "Polygon"
-            : projectDrawMode === "polygon"
-              ? "Linie"
-              : projectDrawMode === "line"
-                ? "Punkt"
-                : "Aus";
+            : nextMode
+              ? getProjectObjectTypeLabel(nextMode)
+              : "Aus";
           const tooltip = !projectDrawActive
             ? "Zeichnen aus. Klick startet Polygon."
             : `${tip}. Naechster Klick: ${nextStepLabel}.`;
@@ -8979,6 +9973,13 @@
           const hasRedoDraft = projectDraftRedoCoords.length > 0;
           const hasObjects = projectObjects.length > 0;
           const hasVisibleObjects = hasVisibleProjectObjects();
+          const selectedObjects = getSelectedProjectObjects();
+          const selectedPolygonObjects = selectedObjects.filter(
+            item => isPolygonGeometryType(item?.geometry?.type)
+          );
+          const canFuseSelected =
+            selectedPolygonObjects.length >= 2 &&
+            selectedPolygonObjects.length === selectedObjects.length;
           if (projectDrawToggle) {
             projectDrawToggle.classList.toggle("is-active", projectDrawActive);
             projectDrawToggle.setAttribute("aria-pressed", String(projectDrawActive));
@@ -9001,6 +10002,13 @@
           }
           if (projectLayerClearAll) {
             projectLayerClearAll.disabled = !hasObjects;
+          }
+          if (projectLayerFuseSelected) {
+            projectLayerFuseSelected.disabled = !canFuseSelected;
+            projectLayerFuseSelected.title = canFuseSelected
+              ? `${selectedPolygonObjects.length} Polygone verschmelzen`
+              : "Mindestens zwei Polygon-Objekte auswählen";
+            projectLayerFuseSelected.setAttribute("aria-label", projectLayerFuseSelected.title);
           }
           updateProjectClusterLassoButtonUi();
           updateProjectDrawModeUi();
@@ -9034,12 +10042,9 @@
             setProjectExportStatus(getProjectDrawInstruction("polygon"));
             return;
           }
-          if (projectDrawMode === "polygon") {
-            setProjectDrawMode("line");
-            return;
-          }
-          if (projectDrawMode === "line") {
-            setProjectDrawMode("point");
+          const currentIndex = projectDrawModes.indexOf(projectDrawMode);
+          if (currentIndex >= 0 && currentIndex < projectDrawModes.length - 1) {
+            setProjectDrawMode(projectDrawModes[currentIndex + 1]);
             return;
           }
           clearProjectDraft();
@@ -9051,6 +10056,8 @@
           const next = !!isActive;
           projectDrawActive = next;
           if (next) {
+            stopProjectEditDrag();
+            clearProjectEditHoverHandle();
             setMeasureActive(false);
             if (projectClusterLassoActive) {
               setProjectClusterLassoActive(false);
@@ -9074,7 +10081,11 @@
           name,
           bufferMeters = 0,
           legendAlias = "",
-          pointClusterId = projectPointClusterDefaultId
+          pointClusterId = projectPointClusterDefaultId,
+          rectangleState = null,
+          displayColor = "",
+          importProperties = null,
+          labelField = ""
         }) {
           const nextGeometry = geometry ? cloneJson(geometry) : normalizeDraftGeometry(mode, coords);
           if (!nextGeometry) return null;
@@ -9093,11 +10104,27 @@
           if (nextLegendAlias) {
             item.legendAlias = nextLegendAlias;
           }
+          const nextDisplayColor = getProjectStoredObjectColor(displayColor);
+          if (nextDisplayColor) {
+            item.displayColor = nextDisplayColor;
+          }
+          const nextImportProperties = cloneProjectImportProperties(importProperties);
+          if (nextImportProperties) {
+            item.importProperties = nextImportProperties;
+          }
+          const nextLabelField = String(labelField || "").trim();
+          if (nextLabelField) {
+            item.labelField = nextLabelField;
+          }
+          const normalizedRectangleState = normalizeProjectRectangleState(rectangleState);
+          if (normalizedRectangleState) {
+            item.rectangleState = normalizedRectangleState;
+          }
           if (nextMode === "point") {
             setProjectPointCluster(item, pointClusterId);
           }
           projectObjects.push(item);
-          projectSelectedObjectId = item.id;
+          setProjectObjectSelection([item.id], { primaryId: item.id, update: false });
           updateProjectAreaSource();
           return item;
         }
@@ -9121,6 +10148,7 @@
           projectMergedBufferGeometryCache.clear();
           projectPointClusterColorOverrides.clear();
           projectSelectedObjectId = "";
+          projectSelectedObjectIds.clear();
           projectObjectSeq = 1;
           projectClusterLassoActive = false;
           resetProjectClusterLassoPreview();
@@ -9154,9 +10182,14 @@
             setProjectExportStatus("Geometrie konnte nicht erstellt werden.", true);
             return;
           }
+          const rectangleState =
+            projectDrawMode === "square"
+              ? createProjectRectangleStateFromCornerCoords(projectDraftCoords)
+              : null;
           const created = addProjectObject({
             mode: projectDrawMode,
-            geometry
+            geometry,
+            rectangleState
           });
           if (!created) {
             setProjectExportStatus("Objekt konnte nicht erstellt werden.", true);
@@ -9212,6 +10245,19 @@
               return;
             }
             setProjectExportStatus("Punkt gesetzt.");
+            return;
+          }
+          if (projectDrawMode === "square") {
+            projectDraftRedoCoords = [];
+            if (!projectDraftCoords.length) {
+              projectDraftCoords = [next];
+              projectDraftHoverCoord = next;
+              updateProjectAreaSource();
+              return;
+            }
+            projectDraftCoords = [projectDraftCoords[0], next];
+            projectDraftHoverCoord = next;
+            finalizeProjectDraw();
             return;
           }
           const clickDetail = Number(event.originalEvent?.detail || 1);
@@ -10656,8 +11702,13 @@
             return false;
           }
           assignProjectPointCluster(selectedItems, promptResult.clusterId);
-          projectSelectedObjectId =
-            selectedItems[selectedItems.length - 1]?.id || projectSelectedObjectId;
+          const lastSelectedPointId = selectedItems[selectedItems.length - 1]?.id;
+          if (lastSelectedPointId) {
+            setProjectObjectSelection([lastSelectedPointId], {
+              primaryId: lastSelectedPointId,
+              update: false
+            });
+          }
           resetProjectClusterLassoPreview();
           updateProjectAreaSource();
           setProjectExportStatus(
@@ -10698,6 +11749,8 @@
             return true;
           }
           if (next) {
+            stopProjectEditDrag();
+            clearProjectEditHoverHandle();
             if (measureActive) setMeasureActive(false);
             if (projectDrawActive) {
               clearProjectDraft();
@@ -10828,7 +11881,10 @@
             created.push(item);
           });
           if (!created.length) return [];
-          projectSelectedObjectId = created[created.length - 1].id;
+          setProjectObjectSelection(
+            [created[created.length - 1].id],
+            { primaryId: created[created.length - 1].id, update: false }
+          );
           clearProjectDraft();
           if (projectDrawActive) {
             setProjectDrawActive(false);
@@ -15160,6 +16216,12 @@
           });
         }
 
+        if (projectLayerFuseSelected) {
+          projectLayerFuseSelected.addEventListener("click", () => {
+            fuseSelectedProjectObjects();
+          });
+        }
+
         if (projectLayerKmlDownload) {
           projectLayerKmlDownload.addEventListener("click", async () => {
             const now = new Date();
@@ -15553,6 +16615,9 @@
             } else {
               setProjectDrawActive(false);
             }
+          }
+          if (isProjectEditDragging()) {
+            handleProjectEditEnd();
           }
           if (projectExportModal && !projectExportModal.classList.contains("is-hidden")) {
             setProjectExportOpen(false);
@@ -16017,16 +17082,90 @@
 
         // Popup elements are created lazily on first use.
 
+        function updateProjectEditHoverFromPoint(point) {
+          if (isProjectEditDragging() || !point) return false;
+          if (!getActiveProjectEditObject()) {
+            clearProjectEditHoverHandle();
+            return false;
+          }
+          const handle = getProjectEditHandleAtPoint(point);
+          projectEditHoveredHandle = handle;
+          if (handle?.cursor) {
+            setMapCursor(handle.cursor);
+            return true;
+          }
+          return false;
+        }
+
+        function handleProjectEditStart(event) {
+          if (
+            isMeasureActive() ||
+            projectDrawActive ||
+            projectClusterLassoActive ||
+            isProjectExportPreviewStep()
+          ) {
+            return false;
+          }
+          const button = Number(event?.originalEvent?.button);
+          if (button !== 0) return false;
+          const point = event?.point;
+          const lngLat = event?.lngLat;
+          if (!point || !lngLat) return false;
+          const handle = getProjectEditHandleAtPoint(point);
+          if (!handle) return false;
+          if (event?.originalEvent?.preventDefault) event.originalEvent.preventDefault();
+          if (event?.originalEvent?.stopPropagation) event.originalEvent.stopPropagation();
+          hidePopup();
+          closeMapContextMenu();
+          return startProjectEditDrag(handle, lngLat);
+        }
+
+        function handleProjectEditMove(event) {
+          if (isProjectEditDragging()) {
+            applyProjectEditDragMove(event?.lngLat);
+            if (projectEditDragState?.handleType === "rect-edge") {
+              const cursor = projectEditHoveredHandle?.cursor || "move";
+              setMapCursor(cursor);
+            } else if (projectEditDragState?.handleType === "rect-rotate") {
+              setMapCursor("crosshair");
+            } else {
+              setMapCursor("move");
+            }
+            return true;
+          }
+          return updateProjectEditHoverFromPoint(event?.point);
+        }
+
+        function handleProjectEditEnd() {
+          if (!isProjectEditDragging()) return false;
+          stopProjectEditDrag();
+          if (typeof window !== "undefined") {
+            window.setTimeout(() => {
+              projectEditSuppressNextClick = false;
+            }, 0);
+          }
+          if (projectEditHoveredHandle?.cursor) {
+            setMapCursor(projectEditHoveredHandle.cursor);
+          } else {
+            setMapCursor("");
+          }
+          return true;
+        }
+
         map.on("click", () => {
+          if (projectEditSuppressNextClick) return;
           hidePopup();
           closeMapContextMenu();
         });
+        map.on("mousedown", handleProjectEditStart);
         map.on("mousedown", handleProjectClusterLassoStart);
+        map.on("mouseup", handleProjectEditEnd);
         map.on("mouseup", handleProjectClusterLassoEnd);
         map.on("click", handleProjectMapClick);
         map.on("dblclick", handleProjectMapDoubleClick);
         map.on("click", handleMeasureClick);
         map.on("click", event => {
+          if (consumeProjectEditClickSuppression()) return;
           if (isMeasureActive() || projectDrawActive || projectClusterLassoActive) return;
           if (isProjectExportPreviewStep()) return;
           const now = typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -16099,6 +17238,9 @@
             return;
           }
           if (!event?.point) return;
+          if (handleProjectEditMove(event)) {
+            return;
+          }
           if (projectClusterLassoActive) {
             handleProjectClusterLassoMove(event);
             setMapCursor(projectClusterLassoPanning ? "grabbing" : "crosshair");
@@ -16121,9 +17263,11 @@
         });
         map.on("mouseout", () => {
           if (projectExportFrameDragActive) return;
+          clearProjectEditHoverHandle();
           setMapCursor("");
         });
         window.addEventListener("mouseup", () => {
+          handleProjectEditEnd();
           handleProjectClusterLassoEnd();
         });
 
@@ -17911,11 +19055,19 @@
               ? "grabbing"
               : kind === "grab"
                 ? "grab"
-                : kind === "pointer"
-                  ? "pointer"
-                  : isMeasureActive() || projectDrawActive || projectClusterLassoActive
-                    ? "crosshair"
-                    : "default";
+                : kind === "move"
+                  ? "move"
+                  : kind === "ew-resize"
+                    ? "ew-resize"
+                    : kind === "ns-resize"
+                      ? "ns-resize"
+                      : kind === "crosshair"
+                        ? "crosshair"
+                  : kind === "pointer"
+                    ? "pointer"
+                    : isMeasureActive() || projectDrawActive || projectClusterLassoActive
+                      ? "crosshair"
+                      : "default";
 
           const canvasContainer =
             typeof map.getCanvasContainer === "function" ? map.getCanvasContainer() : null;
