@@ -14429,25 +14429,34 @@
         }
 
         function sanitizeEmailTemplateValue(value, fallback = "-") {
-          const text = String(value == null ? "" : value).replace(/\r?\n+/g, " ").trim();
+          if (value == null) return fallback;
+          if (Array.isArray(value)) {
+            const text = value
+              .map(entry => sanitizeEmailTemplateValue(entry, ""))
+              .filter(Boolean)
+              .join(", ")
+              .trim();
+            return text || fallback;
+          }
+          if (typeof value === "object") {
+            try {
+              const text = JSON.stringify(value);
+              return text && text !== "{}" && text !== "[]" ? text : fallback;
+            } catch (_err) {
+              return fallback;
+            }
+          }
+          const text = String(value).replace(/\r?\n+/g, " ").trim();
           return text || fallback;
         }
 
-        function buildProjectEmailRequestTemplateText(templateText, meta) {
-          const safeMeta = meta && typeof meta === "object" ? meta : {};
-          const replacements = {
-            "{{costCenter}}": sanitizeEmailTemplateValue(safeMeta.kst || safeMeta.costCenter || ""),
-            "{{projectName}}": sanitizeEmailTemplateValue(safeMeta.projektname),
-            "{{projectDescription}}": sanitizeEmailTemplateValue(safeMeta.beschreibung),
-            "{{siteManager}}": sanitizeEmailTemplateValue(safeMeta.bauleitung),
-            "{{siteManagerContact}}": sanitizeEmailTemplateValue(safeMeta.kontaktBauleitung),
-            "{{startDate}}": sanitizeEmailTemplateValue(safeMeta.baubeginn)
-          };
-          let output = String(templateText || "");
-          Object.entries(replacements).forEach(([token, value]) => {
-            output = output.split(token).join(String(value));
+        function buildProjectEmailRequestTemplateText(templateText, templateData) {
+          const safeData = templateData && typeof templateData === "object" ? templateData : {};
+          return String(templateText || "").replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (match, rawKey) => {
+            const key = String(rawKey || "").trim();
+            if (!key || !Object.prototype.hasOwnProperty.call(safeData, key)) return match;
+            return sanitizeEmailTemplateValue(safeData[key]);
           });
-          return output;
         }
 
         function parseFirstSvgNumber(value, fallback = NaN) {
@@ -15029,7 +15038,7 @@
                 if (!templateText) {
                   throw new Error(`Template-Datei template/${fileName} nicht gefunden.`);
                 }
-                return [fileName, buildProjectEmailRequestTemplateText(templateText, meta)];
+                return [fileName, buildProjectEmailRequestTemplateText(templateText, projectData)];
               })
             );
             const zip = new JSZip();

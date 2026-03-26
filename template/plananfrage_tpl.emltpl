@@ -1,9 +1,9 @@
 Subject:
-	=?Windows-1252?Q?Planauskunft_f=FCr_Projekt_=96_{{costCenter}}_{{projectN?=
- =?Windows-1252?Q?ame}}?=
+	=?Windows-1252?Q?Planauskunft_f=FCr_Projekt_=96_{{costCenter}}?=
+	=?Windows-1252?Q?_=20{{projectName}}?=
 Thread-Topic:
-	=?Windows-1252?Q?Planauskunft_f=FCr_Projekt_=96_{{costCenter}}_{{projectN?=
- =?Windows-1252?Q?ame}}?=
+	=?Windows-1252?Q?Planauskunft_f=FCr_Projekt_=96_{{costCenter}}?=
+	=?Windows-1252?Q?_=20{{projectName}}?=
 Thread-Index: AQHcsgEsXfVrtOCaFkuK8+AcA5gqfA==
 Date: Thu, 12 Mar 2026 09:18:22 +0000
 Message-ID:
@@ -149,12 +149,8 @@ entcolor windowtext currentcolor currentcolor; padding: 0cm 5.4pt; vertical=
 -align: top; width: 659.15pt; height: 35px; box-sizing: border-box;">
 <p class=3D"MsoNormal" style=3D"text-align: left; margin: 0cm 0cm 12pt;"><s=
 pan style=3D"font-family: &quot;Calibri Light&quot;, sans-serif; font-size:=
- 11pt; color: rgb(64, 64, 64);">{{</span><span style=3D"font-family: &quot;=
-Calibri Light&quot;, sans-serif; font-size: 11pt; color: rgb(0, 0, 0);">sit=
-eManager}}</span><span style=3D"font-family: &quot;Calibri Light&quot;, san=
-s-serif; font-size: 11pt; color: rgb(64, 64, 64);">&nbsp;{{</span><span sty=
-le=3D"font-family: &quot;Calibri Light&quot;, sans-serif; font-size: 11pt; =
-color: rgb(0, 0, 0);">siteManagerContact}}</span></p>
+ 11pt; color: rgb(0, 0, 0);">{{siteManager}} {{siteManagerContact}}</span></=
+p>
 </td>
 </tr>
 <tr>
@@ -173,9 +169,7 @@ tcolor windowtext windowtext currentcolor; padding: 0cm 5.4pt; vertical-ali=
 gn: top; width: 659.15pt; height: 35.5px; box-sizing: border-box;">
 <p class=3D"MsoNormal" style=3D"text-align: left; margin: 0cm 0cm 12pt;"><s=
 pan style=3D"font-family: &quot;Calibri Light&quot;, sans-serif; font-size:=
- 11pt; color: rgb(64, 64, 64);">{{</span><span style=3D"font-family: &quot;=
-Calibri Light&quot;, sans-serif; font-size: 11pt; color: rgb(0, 0, 0);">sta=
-rtDate}}</span></p>
+ 11pt; color: rgb(0, 0, 0);">{{startDate}}</span></p>
 </td>
 </tr>
 </tbody>
