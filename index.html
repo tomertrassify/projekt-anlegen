@@ -4413,8 +4413,8 @@
         let planTemplateQptDefinitionCacheTemplateId = "";
         let planTemplateQptLoadPromise = null;
         let planTemplateQptLoadTemplateId = "";
-        let projectEmailTemplateV2Cache = "";
-        let projectEmailTemplateV2LoadPromise = null;
+        const projectEmailRequestTemplateCache = new Map();
+        const projectEmailRequestTemplateLoadPromises = new Map();
         let projectAreaFeature = null;
         let projectObjects = [];
         const projectMergedBufferGeometryCache = new Map();
@@ -14398,24 +14398,31 @@
           });
         }
 
-        async function loadProjectEmailTemplateV2Text() {
-          if (projectEmailTemplateV2Cache) return projectEmailTemplateV2Cache;
-          if (projectEmailTemplateV2LoadPromise) return projectEmailTemplateV2LoadPromise;
-          projectEmailTemplateV2LoadPromise = (async () => {
+        async function loadProjectEmailRequestTemplateText(templateFileName) {
+          const fileName = String(templateFileName || "").trim();
+          if (!fileName) return "";
+          if (projectEmailRequestTemplateCache.has(fileName)) {
+            return projectEmailRequestTemplateCache.get(fileName) || "";
+          }
+          const pendingLoad = projectEmailRequestTemplateLoadPromises.get(fileName);
+          if (pendingLoad) return pendingLoad;
+          const loadPromise = (async () => {
             try {
-              const res = await fetch("template/email-template-v2.emltpl", { cache: "no-store" });
+              const res = await fetch(`template/${fileName}`, { cache: "no-store" });
               if (!res.ok) return "";
               const text = await res.text();
-              projectEmailTemplateV2Cache = text || "";
-              return projectEmailTemplateV2Cache;
+              const normalizedText = text || "";
+              projectEmailRequestTemplateCache.set(fileName, normalizedText);
+              return normalizedText;
             } catch (_err) {
               return "";
             } finally {
-              projectEmailTemplateV2LoadPromise = null;
+              projectEmailRequestTemplateLoadPromises.delete(fileName);
             }
           })();
+          projectEmailRequestTemplateLoadPromises.set(fileName, loadPromise);
           try {
-            return await projectEmailTemplateV2LoadPromise;
+            return await loadPromise;
           } catch (_err) {
             return "";
           }
@@ -14426,98 +14433,15 @@
           return text || fallback;
         }
 
-        function chunkBase64Lines(base64Text, lineLength = 76) {
-          const text = String(base64Text || "").replace(/\s+/g, "");
-          if (!text) return "";
-          const size = Number.isFinite(lineLength) && lineLength > 0 ? Math.floor(lineLength) : 76;
-          const lines = [];
-          for (let idx = 0; idx < text.length; idx += size) {
-            lines.push(text.slice(idx, idx + size));
-          }
-          return lines.join("\r\n");
-        }
-
-        async function encodeBlobToBase64(blob) {
-          if (!blob || typeof blob.arrayBuffer !== "function") return "";
-          const bytes = new Uint8Array(await blob.arrayBuffer());
-          if (!bytes.length || typeof btoa !== "function") return "";
-          let binary = "";
-          const chunkSize = 0x8000;
-          for (let idx = 0; idx < bytes.length; idx += chunkSize) {
-            const chunk = bytes.subarray(idx, idx + chunkSize);
-            let segment = "";
-            for (let i = 0; i < chunk.length; i += 1) {
-              segment += String.fromCharCode(chunk[i]);
-            }
-            binary += segment;
-          }
-          return btoa(binary);
-        }
-
-        function extractMimeTopBoundary(emailText) {
-          const text = String(emailText || "");
-          const headerEndIdx = text.search(/\r?\n\r?\n/);
-          const headerText = headerEndIdx >= 0 ? text.slice(0, headerEndIdx) : text;
-          const boundaryMatch = headerText.match(
-            /Content-Type:\s*multipart\/[^\r\n;]+;[\s\S]*?\bboundary\s*=\s*"([^"\r\n]+)"/i
-          );
-          if (boundaryMatch?.[1]) return boundaryMatch[1];
-          const fallback = headerText.match(/\bboundary\s*=\s*"([^"\r\n]+)"/i);
-          return fallback?.[1] || "";
-        }
-
-        function injectPdfAttachmentIntoEmailTemplate(emailText, pdfBase64, pdfFilename) {
-          const text = String(emailText || "");
-          const base64 = String(pdfBase64 || "").replace(/\s+/g, "");
-          const fileName = sanitizeFileName(pdfFilename || "Projekt.pdf") || "Projekt.pdf";
-          const boundary = extractMimeTopBoundary(text);
-          if (!text || !base64 || !boundary) return text;
-          const boundaryClose = `--${boundary}--`;
-          const boundaryOpen = `--${boundary}`;
-          const attachmentPart =
-            `${boundaryOpen}\r\n` +
-            "Content-Type: application/pdf;\r\n" +
-            `\tname="${fileName}"\r\n` +
-            `Content-Description: ${fileName}\r\n` +
-            "Content-Disposition: attachment;\r\n" +
-            `\tfilename="${fileName}"\r\n` +
-            "Content-Transfer-Encoding: base64\r\n\r\n" +
-            `${chunkBase64Lines(base64)}\r\n`;
-          const closeIdx = text.lastIndexOf(boundaryClose);
-          if (closeIdx < 0) {
-            const trimmed = text.replace(/\s+$/, "");
-            return `${trimmed}\r\n${attachmentPart}${boundaryClose}\r\n`;
-          }
-          const before = text.slice(0, closeIdx).replace(/\s+$/, "");
-          const after = text.slice(closeIdx);
-          return `${before}\r\n${attachmentPart}${after}`;
-        }
-
-        function buildProjectEmailTemplateV2Text(templateText, meta) {
+        function buildProjectEmailRequestTemplateText(templateText, meta) {
           const safeMeta = meta && typeof meta === "object" ? meta : {};
-          const projectName = sanitizeEmailTemplateValue(safeMeta.projektname);
-          const activityType = sanitizeEmailTemplateValue(safeMeta.artDerTaetigkeit);
-          const customer = sanitizeEmailTemplateValue(
-            safeMeta.kunde || safeMeta.customer || safeMeta.kst || "",
-            ""
-          );
-          const projectLocation = sanitizeEmailTemplateValue(
-            [safeMeta.strassenadresse, safeMeta.beschreibung].filter(Boolean).join(" | ")
-          );
-          const contactValue = sanitizeEmailTemplateValue(
-            [safeMeta.bauleitung, safeMeta.kontaktBauleitung].filter(Boolean).join(" | ")
-          );
-          const startDate = sanitizeEmailTemplateValue(safeMeta.baubeginn);
-          const client = sanitizeEmailTemplateValue(safeMeta.auftraggeber);
           const replacements = {
-            "{{Art}}": activityType,
-            "{{Projektname}}": projectName,
-            "{{PROJECT_NAME_HTML}}": projectName,
-            "{{KST_HTML}}": customer || "-",
-            "{{DESCRIPTION_HTML}}": projectLocation,
-            "{{CLIENT_HTML}}": client,
-            "{{CONTACT_HTML}}": contactValue,
-            "{{START_DATE_HTML}}": startDate
+            "{{costCenter}}": sanitizeEmailTemplateValue(safeMeta.kst || safeMeta.costCenter || ""),
+            "{{projectName}}": sanitizeEmailTemplateValue(safeMeta.projektname),
+            "{{projectDescription}}": sanitizeEmailTemplateValue(safeMeta.beschreibung),
+            "{{siteManager}}": sanitizeEmailTemplateValue(safeMeta.bauleitung),
+            "{{siteManagerContact}}": sanitizeEmailTemplateValue(safeMeta.kontaktBauleitung),
+            "{{startDate}}": sanitizeEmailTemplateValue(safeMeta.baubeginn)
           };
           let output = String(templateText || "");
           Object.entries(replacements).forEach(([token, value]) => {
@@ -15098,26 +15022,31 @@
               throw new Error("ZIP-Export benötigt JSZip.");
             }
             setProjectExportStatus("Export-Dateien werden gepackt ...");
-            const emailTemplateRaw = await loadProjectEmailTemplateV2Text();
-            if (!emailTemplateRaw) {
-              throw new Error("Template-Datei template/email-template-v2.emltpl nicht gefunden.");
-            }
+            const emailRequestTemplateNames = ["plananfrage_tpl.eml", "plananfrage_tpl.emltpl"];
+            const emailRequestTemplates = await Promise.all(
+              emailRequestTemplateNames.map(async fileName => {
+                const templateText = await loadProjectEmailRequestTemplateText(fileName);
+                if (!templateText) {
+                  throw new Error(`Template-Datei template/${fileName} nicht gefunden.`);
+                }
+                return [fileName, buildProjectEmailRequestTemplateText(templateText, meta)];
+              })
+            );
             const zip = new JSZip();
             const info = zip.folder("001_Projektinfos");
             if (!info) {
               throw new Error("ZIP-Ordner 001_Projektinfos konnte nicht erstellt werden.");
             }
-            const emailTemplateFilled = buildProjectEmailTemplateV2Text(emailTemplateRaw, meta);
-            const pdfBase64 = await encodeBlobToBase64(planPdfBlob);
-            const emailTemplateText = injectPdfAttachmentIntoEmailTemplate(
-              emailTemplateFilled,
-              pdfBase64,
-              qptPdfName
-            );
+            const emailRequestFolder = info.folder("Email-Anfrage");
+            if (!emailRequestFolder) {
+              throw new Error("ZIP-Ordner 001_Projektinfos/Email-Anfrage konnte nicht erstellt werden.");
+            }
             info.file(qptPdfName, planPdfBlob);
             info.file(kmlName, kmlText);
             info.file("projekt-daten.json", projectDataText);
-            info.file("email-template-v2.emltpl", emailTemplateText);
+            emailRequestTemplates.forEach(([fileName, fileContent]) => {
+              emailRequestFolder.file(fileName, fileContent);
+            });
             if (hasVisibleProjectClusterStructure()) {
               const clusterKmlFiles = buildProjectKmlExportFiles(meta.projektname || baseName);
               clusterKmlFiles.forEach(file => {
