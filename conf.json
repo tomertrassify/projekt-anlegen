@@ -24,6 +24,19 @@
       "attribution": "© OpenStreetMap contributors, © MapTiler"
     },
     {
+      "id": "osm-standard",
+      "label": "OpenStreetMap Standard",
+      "type": "raster",
+      "tiles": [
+        "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png"
+      ],
+      "tileSize": 256,
+      "preview": "assets/img/simple-map.webp",
+      "attribution": "© OpenStreetMap contributors"
+    },
+    {
       "id": "maptiler-satellite",
       "label": "MapTiler Satellite",
       "type": "style",
