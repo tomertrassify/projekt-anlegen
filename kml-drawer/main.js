@@ -90,7 +90,77 @@
   const searchPanel = document.getElementById('searchPanel');
   const searchToggle = document.getElementById('searchToggle');
   let activeBasemap = 'osm';
+  let basemapOverlayRestoreTimer = null;
   const mapFooterLabel = document.getElementById('sourceLabel');
+
+  function ensureLeafletLayerAdded(layer) {
+    if (!layer || map.hasLayer(layer)) return;
+    try {
+      map.addLayer(layer);
+    } catch (_) {}
+  }
+
+  function bringLeafletLayerToFront(layer) {
+    if (!layer) return;
+    if (typeof layer.eachLayer === 'function') {
+      try {
+        layer.eachLayer(child => bringLeafletLayerToFront(child));
+      } catch (_) {}
+    }
+    if (typeof layer.bringToFront === 'function') {
+      try {
+        layer.bringToFront();
+      } catch (_) {}
+    }
+  }
+
+  function restoreVisibleOverlayLayers() {
+    (objects || []).forEach(o => {
+      if (!o) return;
+      if (o.visible !== false) {
+        ensureLeafletLayerAdded(o.polylineLayer);
+        ensureLeafletLayerAdded(o.tempLine);
+        (o.vertexMarkers || []).forEach(marker => ensureLeafletLayerAdded(marker));
+      }
+      if (o.bufferLayer && o.bufferVisible !== false) {
+        ensureLeafletLayerAdded(o.bufferLayer);
+      }
+      bringLeafletLayerToFront(o.bufferLayer);
+      bringLeafletLayerToFront(o.polylineLayer);
+      bringLeafletLayerToFront(o.tempLine);
+      (o.vertexMarkers || []).forEach(marker => bringLeafletLayerToFront(marker));
+    });
+
+    if (measureLine) ensureLeafletLayerAdded(measureLine);
+    if (measureTempLine) ensureLeafletLayerAdded(measureTempLine);
+    (measureMarkers || []).forEach(marker => ensureLeafletLayerAdded(marker));
+    if (snapMarker) ensureLeafletLayerAdded(snapMarker);
+
+    bringLeafletLayerToFront(measureLine);
+    bringLeafletLayerToFront(measureTempLine);
+    (measureMarkers || []).forEach(marker => bringLeafletLayerToFront(marker));
+    bringLeafletLayerToFront(snapMarker);
+  }
+
+  function scheduleVisibleOverlayRestore() {
+    if (basemapOverlayRestoreTimer) {
+      clearTimeout(basemapOverlayRestoreTimer);
+      basemapOverlayRestoreTimer = null;
+    }
+    const delays = [0, 60, 180, 360];
+    delays.forEach(delay => {
+      window.setTimeout(() => {
+        restoreVisibleOverlayLayers();
+      }, delay);
+    });
+    window.requestAnimationFrame(() => {
+      restoreVisibleOverlayLayers();
+    });
+    basemapOverlayRestoreTimer = window.setTimeout(() => {
+      restoreVisibleOverlayLayers();
+      basemapOverlayRestoreTimer = null;
+    }, 700);
+  }
 
   function applyBasemap(mode) {
     const normalized = (mode === 'maptiler') ? 'osm' : (mode || 'osm'); // keep old value compatible
@@ -111,7 +181,19 @@
       btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
     });
     updateBasemapAttribution();
+    scheduleVisibleOverlayRestore();
   }
+
+  [osm, esriSat].forEach(layer => {
+    if (layer && typeof layer.on === 'function') {
+      layer.on('load', scheduleVisibleOverlayRestore);
+    }
+  });
+  map.on('layeradd', (event) => {
+    if (event && (event.layer === osm || event.layer === esriSat)) {
+      scheduleVisibleOverlayRestore();
+    }
+  });
 
   // close menus when clicking outside
   document.addEventListener('click', (ev) => {

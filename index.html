@@ -2146,12 +2146,119 @@
           }
         }
 
+        function getRuntimeOverlaySourceIds() {
+          return [
+            measureSourceId,
+            projectSourceId,
+            projectClusterLassoSourceId,
+            projectExportFrameSourceId
+          ];
+        }
+
+        function getRuntimeOverlayLayerIds() {
+          return [
+            measureLineLayerId,
+            measurePointLayerId,
+            projectBufferFillLayerId,
+            projectObjectFillLayerId,
+            projectBufferLineLayerId,
+            projectObjectLineLayerId,
+            projectClusterLassoFillLayerId,
+            projectClusterLassoLineLayerId,
+            projectClusterLassoPointLayerId,
+            projectObjectPointLayerId,
+            projectObjectAreaLabelLayerId,
+            projectObjectPointLabelLayerId,
+            projectEditEdgeLayerId,
+            projectEditEdgePointLayerId,
+            projectEditRotateLayerId,
+            projectEditVertexLayerId,
+            projectDraftPreviewLayerId,
+            projectDraftVertexLayerId,
+            projectExportRasterFrameFillLayerId,
+            projectExportRasterFrameLineLayerId,
+            projectExportRasterFrameLabelLayerId,
+            projectExportFrameFillLayerId,
+            projectExportFrameLineBackLayerId,
+            projectExportFrameLineLayerId,
+            projectExportRasterSnapGuideLayerId,
+            projectExportFrameCenterLayerId
+          ];
+        }
+
+        function captureRuntimeOverlayStyleSnapshot() {
+          const styleState = map?.getStyle?.();
+          if (!styleState || typeof styleState !== "object") return null;
+
+          const sourceIds = new Set(getRuntimeOverlaySourceIds());
+          const layerIds = new Set(getRuntimeOverlayLayerIds());
+          const sources = {};
+          sourceIds.forEach(sourceId => {
+            if (styleState.sources && styleState.sources[sourceId]) {
+              sources[sourceId] = cloneJson(styleState.sources[sourceId]);
+            }
+          });
+          const layers = Array.isArray(styleState.layers)
+            ? styleState.layers
+                .filter(layer => layerIds.has(String(layer?.id || "")))
+                .map(layer => cloneJson(layer))
+                .filter(Boolean)
+            : [];
+          if (!Object.keys(sources).length && !layers.length) return null;
+          return { sources, layers };
+        }
+
+        function mergeRuntimeOverlayStyleSnapshot(nextStyle, snapshot) {
+          const mergedStyle = cloneJson(nextStyle) || {};
+          mergedStyle.sources =
+            mergedStyle.sources && typeof mergedStyle.sources === "object"
+              ? mergedStyle.sources
+              : {};
+          Object.entries(snapshot?.sources || {}).forEach(([sourceId, sourceDef]) => {
+            if (!sourceId || !sourceDef) return;
+            mergedStyle.sources[sourceId] = cloneJson(sourceDef);
+          });
+          const layerIds = new Set(
+            Array.isArray(snapshot?.layers)
+              ? snapshot.layers.map(layer => String(layer?.id || "")).filter(Boolean)
+              : []
+          );
+          const existingLayers = Array.isArray(mergedStyle.layers) ? mergedStyle.layers : [];
+          mergedStyle.layers = existingLayers.filter(
+            layer => !layerIds.has(String(layer?.id || ""))
+          );
+          (snapshot?.layers || []).forEach(layer => {
+            if (!layer || typeof layer !== "object") return;
+            const sourceId = String(layer.source || "").trim();
+            if (sourceId && !mergedStyle.sources[sourceId]) return;
+            mergedStyle.layers.push(cloneJson(layer));
+          });
+          return mergedStyle;
+        }
+
+        function applyMapStyleWithRuntimeOverlays(style) {
+          const runtimeSnapshot = captureRuntimeOverlayStyleSnapshot();
+          if (!runtimeSnapshot) {
+            map.setStyle(style);
+            return;
+          }
+          try {
+            map.setStyle(style, {
+              transformStyle: (_previousStyle, nextStyle) =>
+                mergeRuntimeOverlayStyleSnapshot(nextStyle, runtimeSnapshot)
+            });
+          } catch (err) {
+            console.warn("Basemap style transform failed, retrying without transform.", err);
+            map.setStyle(style);
+          }
+        }
+
         function applyFallbackBasemap() {
           clearBasemapLoadWatch();
           activeBasemapId = fallbackBasemap.id;
           currentBasemap = fallbackBasemap;
           try {
-            map.setStyle(fallbackStyle);
+            applyMapStyleWithRuntimeOverlays(fallbackStyle);
           } catch (err) {
             console.warn("Unable to apply fallback basemap.", err);
           }
@@ -2187,7 +2294,7 @@
           const next = basemapById.get(id);
           const style = getBasemapStyle(next);
           if (!style) return;
-          map.setStyle(style);
+          applyMapStyleWithRuntimeOverlays(style);
           map?.once?.("style.load", () => {
             scheduleProjectOverlayRestoreAfterStyleChange();
           });
@@ -4463,6 +4570,8 @@
         let projectExportRasterSnapPendingCenter = null;
         let projectExportRasterSnapRaf = 0;
         let projectOverlayStyleRestoreNonce = 0;
+        let projectOverlayStyleRestoreTimer = 0;
+        let projectOverlayStyleRestoreStopTimer = 0;
         let projectExportFrameActive = false;
         let projectExportFrameBounds = null;
         let projectExportFrameCenter = null;
@@ -6461,26 +6570,130 @@
         }
 
         function restoreProjectOverlayLayersAfterStyleChange() {
-          try {
+          const restoreStep = (label, action) => {
+            try {
+              action();
+            } catch (err) {
+              console.warn(`Projekt-Layer-Teil "${label}" konnte nicht restauriert werden:`, err);
+            }
+          };
+
+          restoreStep("measure", () => {
             ensureMeasureLayers();
             updateMeasureSource();
             updateMeasureLabel();
-            ensureProjectAreaLayers();
-            updateProjectAreaSource();
-            if (projectExportFrameActive) {
+          });
+          restoreStep("project-objects", () => {
+            syncProjectSourcesAfterStyleChange();
+          });
+          if (projectExportFrameActive) {
+            restoreStep("export-frame", () => {
               ensureProjectExportFrameLayers();
               updateProjectExportFramePreview({ syncToMapCenter: false });
-            }
+            });
+          }
+          restoreStep("layer-order", () => {
             bringProjectOverlayLayersToFront();
-          } catch (err) {
-            console.warn(
-              "Projekt-Layer nach Style-Wechsel konnten nicht vollständig restauriert werden:",
-              err
-            );
+          });
+          return areProjectOverlayLayersRestored();
+        }
+
+        function clearProjectOverlayRestoreTimers() {
+          if (projectOverlayStyleRestoreTimer) {
+            clearInterval(projectOverlayStyleRestoreTimer);
+            projectOverlayStyleRestoreTimer = 0;
+          }
+          if (projectOverlayStyleRestoreStopTimer) {
+            clearTimeout(projectOverlayStyleRestoreStopTimer);
+            projectOverlayStyleRestoreStopTimer = 0;
           }
         }
 
+        function hasProjectAreaOverlayState() {
+          return (
+            projectObjects.some(item => !!item?.geometry) ||
+            projectDraftCoords.length > 0 ||
+            !!projectDraftHoverCoord ||
+            !!getActiveProjectEditObject(projectObjects)
+          );
+        }
+
+        function hasProjectClusterLassoOverlayState() {
+          return projectClusterLassoActive || projectClusterLassoSelectionIds.length > 0;
+        }
+
+        function hasProjectOverlayRestoreTargets() {
+          return (
+            measureActive ||
+            measurePoints.length > 0 ||
+            hasProjectAreaOverlayState() ||
+            hasProjectClusterLassoOverlayState() ||
+            projectExportFrameActive
+          );
+        }
+
+        function areProjectOverlayLayersRestored() {
+          if (!map || typeof map.getSource !== "function" || typeof map.getLayer !== "function") {
+            return false;
+          }
+          if (!hasProjectOverlayRestoreTargets()) return true;
+          if (
+            (measureActive || measurePoints.length > 0) &&
+            (!map.getSource(measureSourceId) ||
+              !map.getLayer(measureLineLayerId) ||
+              !map.getLayer(measurePointLayerId))
+          ) {
+            return false;
+          }
+          if (
+            hasProjectAreaOverlayState() &&
+            (!map.getSource(projectSourceId) ||
+              !map.getLayer(projectObjectLineLayerId) ||
+              !map.getLayer(projectObjectPointLayerId) ||
+              !map.getLayer(projectDraftVertexLayerId))
+          ) {
+            return false;
+          }
+          if (
+            hasProjectClusterLassoOverlayState() &&
+            (!map.getSource(projectClusterLassoSourceId) ||
+              !map.getLayer(projectClusterLassoLineLayerId) ||
+              !map.getLayer(projectClusterLassoPointLayerId))
+          ) {
+            return false;
+          }
+          if (
+            projectExportFrameActive &&
+            (!map.getSource(projectExportFrameSourceId) ||
+              !map.getLayer(projectExportFrameLineLayerId))
+          ) {
+            return false;
+          }
+          return true;
+        }
+
+        function syncProjectSourcesAfterStyleChange() {
+          cleanupProjectPointClusterColorOverrides(projectObjects);
+          syncProjectObjectSelectionState();
+          syncProjectAreaFeatureFromObjects(projectSelectedObjectId);
+          ensureProjectAreaLayers();
+          ensureProjectClusterLassoLayers();
+
+          const projectSource = map?.getSource?.(projectSourceId);
+          if (projectSource && typeof projectSource.setData === "function") {
+            projectSource.setData(buildProjectAreaSourceData());
+          }
+
+          const clusterLassoSource = map?.getSource?.(projectClusterLassoSourceId);
+          if (clusterLassoSource && typeof clusterLassoSource.setData === "function") {
+            clusterLassoSource.setData(buildProjectClusterLassoSourceData());
+          }
+
+          bringProjectOverlayLayersToFront();
+        }
+
         function scheduleProjectOverlayRestoreAfterStyleChange() {
+          clearProjectOverlayRestoreTimers();
           projectOverlayStyleRestoreNonce += 1;
           const nonce = projectOverlayStyleRestoreNonce;
           const restoreIfCurrent = () => {
@@ -6488,10 +6701,19 @@
             restoreProjectOverlayLayersAfterStyleChange();
           };
           restoreIfCurrent();
+          if (!hasProjectOverlayRestoreTargets()) return;
           map?.once?.("idle", restoreIfCurrent);
+          map?.once?.("styledata", restoreIfCurrent);
           window.requestAnimationFrame(restoreIfCurrent);
-          setTimeout(restoreIfCurrent, 220);
-          setTimeout(restoreIfCurrent, 520);
+          [120, 320, 700, 1400, 2600, 4200].forEach(delay => {
+            window.setTimeout(restoreIfCurrent, delay);
+          });
+          projectOverlayStyleRestoreTimer = window.setInterval(restoreIfCurrent, 250);
+          projectOverlayStyleRestoreStopTimer = window.setTimeout(() => {
+            if (nonce !== projectOverlayStyleRestoreNonce) return;
+            clearProjectOverlayRestoreTimers();
+            restoreIfCurrent();
+          }, 7000);
         }
 
         function updateProjectExportFrameSource() {
